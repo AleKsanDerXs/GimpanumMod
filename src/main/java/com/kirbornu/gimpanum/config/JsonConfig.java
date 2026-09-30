@@ -50,6 +50,10 @@ public final class JsonConfig {
             return get(field).getAsInt();
         }
 
+        public boolean bool(String field) {
+            return get(field).getAsBoolean();
+        }
+
         public boolean has(String field) {
             return json.has(field);
         }

@@ -1,5 +1,6 @@
 package com.kirbornu.gimpanum.dimension;
 
+import com.kirbornu.gimpanum.perf.PerformanceConfig;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.registries.Registries;
@@ -13,6 +14,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.saveddata.SavedData;
 
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -79,11 +81,31 @@ public final class PortalIndex extends SavedData {
     public static void put(MinecraftServer server, ResourceKey<Level> dimension, BlockPos pos) {
         PortalIndex index = get(server);
         if (index.entries.add(new Entry(dimension, pos.immutable()))) {
+            // Указатель не растёт без предела: лишнее вытесняется с давних записей.
+            int cap = PerformanceConfig.of("portal").integer("max_known");
+            if (cap > 0) {
+                Iterator<Entry> it = index.entries.iterator();
+                while (index.entries.size() > cap && it.hasNext()) {
+                    it.next();
+                    it.remove();
+                }
+            }
             index.setDirty();
         }
     }
 
-    /** Все известные порталы указанного измерения. */
+    /** Вычёркивает портал: арку сломали или проверка нашла на её месте пустоту. */
+    public static void remove(MinecraftServer server, ResourceKey<Level> dimension, BlockPos pos) {
+        PortalIndex index = get(server);
+        if (index.entries.remove(new Entry(dimension, pos.immutable()))) {
+            index.setDirty();
+        }
+    }
+
+    public static int size(MinecraftServer server) {
+        return get(server).entries.size();
+    }
+
     public static List<BlockPos> in(MinecraftServer server, ResourceKey<Level> dimension) {
         List<BlockPos> found = new ArrayList<>();
         for (Entry e : get(server).entries) {

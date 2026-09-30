@@ -45,7 +45,12 @@ public class PurpleQueenTalismanItem extends Item {
             return InteractionResultHolder.fail(held);
         }
 
-        List<ItemStack> loot = CorpseBridge.reclaim(server);
+        CorpseBridge.Result result = CorpseBridge.reclaim(server);
+        if (result.loading()) {
+            say(server, "item.gimpanum.purple_queen_talisman.loading");
+            return InteractionResultHolder.fail(held);
+        }
+        List<ItemStack> loot = result.loot();
         if (loot.isEmpty()) {
             say(server, "item.gimpanum.purple_queen_talisman.empty");
             return InteractionResultHolder.fail(held);

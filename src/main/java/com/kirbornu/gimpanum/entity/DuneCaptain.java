@@ -1,6 +1,7 @@
 package com.kirbornu.gimpanum.entity;
 
 import com.kirbornu.gimpanum.config.JsonConfig;
+import com.kirbornu.gimpanum.perf.ServerLoad;
 import net.minecraft.ChatFormatting;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.component.DataComponents;
@@ -204,6 +205,11 @@ public class DuneCaptain extends DuneWalker {
             return;
         }
         due = false;
+        // Сервер перегружен — подкрепление подождёт: солдат порождает сущности и пути.
+        if (this.level().getServer() != null && ServerLoad.overloaded(this.level().getServer())) {
+            reinforceIn = 40;
+            return;
+        }
         // Следующий срок — от новой численности, со следующего же тика.
         reinforceIn = 1;
         if (summon()) {

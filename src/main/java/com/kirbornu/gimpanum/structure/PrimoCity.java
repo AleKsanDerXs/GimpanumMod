@@ -66,6 +66,8 @@ public final class PrimoCity {
 
         long now = level.getGameTime();
         long window = config.integer("shriek_memory_minutes") * 1200L;
+        // Очереди давно ушедших игроков не копятся: чистим устаревшие при каждом крике.
+        SHRIEKS.values().removeIf(queue -> queue.isEmpty() || now - queue.peekLast() > window);
         Deque<Long> times = SHRIEKS.computeIfAbsent(culprit.getUUID(), id -> new ArrayDeque<>());
         times.addLast(now);
         while (!times.isEmpty() && now - times.peekFirst() > window) {

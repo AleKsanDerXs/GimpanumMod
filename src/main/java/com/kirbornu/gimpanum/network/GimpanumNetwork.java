@@ -1,5 +1,8 @@
 package com.kirbornu.gimpanum.network;
 
+import com.kirbornu.gimpanum.perf.PerformanceConfig;
+import net.neoforged.neoforge.event.server.ServerStoppingEvent;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import com.kirbornu.gimpanum.Gimpanum;
 import com.kirbornu.gimpanum.converter.ConverterBlockEntity;
 import com.kirbornu.gimpanum.converter.ConverterIndex;
@@ -49,7 +52,44 @@ public final class GimpanumNetwork {
      * <p>Список общий на всех: конвертеры — общественные обменники, и прятать
      * их друг от друга смысла нет.
      */
+    private static boolean markersDirty;
+
+    private static long lastMarkers;
+
+    /**
+     * Просит разослать метки конвертеров — не сейчас, а не чаще, чем раз в
+     * {@code converter.marker_broadcast_ticks}. Загрузка чанка с сотней
+     * конвертеров раньше значила сотню рассылок всем игрокам сразу, каждая со
+     * всем списком.
+     */
+    public static void requestMarkerBroadcast() {
+        markersDirty = true;
+    }
+
+    @SubscribeEvent
+    public static void onServerTick(ServerTickEvent.Post event) {
+        if (!markersDirty) {
+            return;
+        }
+        long now = event.getServer().getTickCount();
+        int gap = PerformanceConfig.of("converter").integer("marker_broadcast_ticks");
+        if (now - lastMarkers < gap) {
+            return;
+        }
+        markersDirty = false;
+        lastMarkers = now;
+        broadcastMarkers(event.getServer());
+    }
+
+    @SubscribeEvent
+    public static void onServerStopping(ServerStoppingEvent event) {
+        markersDirty = false;
+    }
+
     public static void broadcastMarkers(MinecraftServer server) {
+        if (server == null || server.getPlayerCount() == 0) {
+            return;
+        }
         List<ConverterMarkersPayload.Marker> markers = collect(server);
         if (markers != null) {
             PacketDistributor.sendToAllPlayers(new ConverterMarkersPayload(markers));

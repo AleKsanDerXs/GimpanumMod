@@ -1,5 +1,6 @@
 package com.kirbornu.gimpanum.dimension;
 
+import com.kirbornu.gimpanum.sublevel.SubLevelSupport;
 import com.kirbornu.gimpanum.registry.GimpanumContent;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -21,7 +22,9 @@ public class NebulaPortalBlockEntity extends BlockEntity {
     @Override
     public void onLoad() {
         super.onLoad();
-        if (level instanceof ServerLevel serverLevel) {
+        // Арка на плоту корабля Sable стоит в служебном регионе карты: выходом
+        // из такой записи не воспользоваться, а указатель она только засорит.
+        if (level instanceof ServerLevel serverLevel && !SubLevelSupport.isOnSubLevel(level, worldPosition)) {
             PortalIndex.put(serverLevel.getServer(), level.dimension(), worldPosition);
         }
     }

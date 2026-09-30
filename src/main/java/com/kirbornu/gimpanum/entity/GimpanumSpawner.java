@@ -3,6 +3,7 @@ package com.kirbornu.gimpanum.entity;
 import com.kirbornu.gimpanum.config.JsonConfig;
 import com.kirbornu.gimpanum.Gimpanum;
 import com.kirbornu.gimpanum.dimension.NebulaPortal;
+import com.kirbornu.gimpanum.perf.ServerLoad;
 import com.kirbornu.gimpanum.registry.GimpanumContent;
 import it.unimi.dsi.fastutil.longs.Long2IntMap;
 import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
@@ -114,7 +115,7 @@ public final class GimpanumSpawner {
             return;
         }
         ServerLevel level = server.getLevel(NebulaPortal.GIMPANUM);
-        if (level == null || level.players().isEmpty()) {
+        if (level == null || level.players().isEmpty() || ServerLoad.overloaded(server)) {
             return;
         }
         int budget = spawner.integer("max_per_pass");
@@ -172,6 +173,19 @@ public final class GimpanumSpawner {
             // медленно ползёт вверх: мобы расходятся по соседям, опустевший чанк
             // просит добавки, а ушедшие никуда не делись.
             room[k] = sum - total(present[k]);
+        }
+
+        // Потолок населения на игрока: считаются и солдаты, которых заселитель сам не ставит.
+        int cap = MobStats.of("spawner").integer("max_per_player");
+        if (cap > 0) {
+            int have = count(level, GimpanumEntities.DUNE_WALKER.get(), region).values().intStream().sum();
+            for (int k = 0; k < kinds.size(); k++) {
+                have += total(present[k]);
+            }
+            if (have >= cap) {
+                return budget;
+            }
+            budget = Math.min(budget, cap - have);
         }
 
         for (int dx = -radius; dx <= radius; dx++) {

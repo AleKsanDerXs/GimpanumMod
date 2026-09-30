@@ -1,5 +1,6 @@
 package com.kirbornu.gimpanum.destruction;
 
+import com.kirbornu.gimpanum.perf.PerformanceConfig;
 import com.kirbornu.gimpanum.Gimpanum;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
@@ -25,7 +26,7 @@ import java.util.function.Consumer;
  *
  * <p>Решение: у блока есть постоянный UUID в NBT, переживающий переезд. При
  * удалении событие не выполняется сразу, а встаёт в очередь на
- * {@link #WINDOW_TICKS} тиков. Если за это время блок с тем же UUID объявится
+ * {@link #window()} тиков. Если за это время блок с тем же UUID объявится
  * где-то ещё — это был переезд, и событие отменяется.
  *
  * <p>Окно считается в тиках, а не в реальном времени, поэтому просадка TPS на
@@ -50,7 +51,12 @@ public final class DestructionArbiter {
      * надо поднять — фактический зазор пишется в лог при каждом распознанном
      * переезде, так что число подбирается по данным, а не на глаз.
      */
-    public static final int WINDOW_TICKS = 5;
+    public static final int DEFAULT_WINDOW_TICKS = 5;
+
+    /** Окно из {@code core.arbiter_window_ticks}: подбирается по журналу, поэтому вынесено в настройку. */
+    public static int window() {
+        return Math.max(1, PerformanceConfig.of("core").integer("arbiter_window_ticks"));
+    }
 
     private static final Map<UUID, PendingRemoval> pendingRemovals = new HashMap<>();
     private static final Map<UUID, Integer> recentAppearances = new HashMap<>();
@@ -92,7 +98,7 @@ public final class DestructionArbiter {
         PendingRemoval pending = pendingRemovals.remove(blockId);
         if (pending != null) {
             Gimpanum.LOGGER.info("[арбитр] {} — переезд подтверждён через {} тиков (окно {})",
-                    blockId, currentTick - pending.removedAtTick(), WINDOW_TICKS);
+                    blockId, currentTick - pending.removedAtTick(), window());
             return;
         }
         recentAppearances.put(blockId, currentTick);
@@ -101,11 +107,12 @@ public final class DestructionArbiter {
     /** Вызывается раз в тик сервера: добивает истёкшие ожидания. */
     public static void tick(MinecraftServer server) {
         currentTick++;
+        int window = window();
 
         if (!pendingRemovals.isEmpty()) {
             List<PendingRemoval> confirmed = new ArrayList<>();
             pendingRemovals.values().removeIf(pending -> {
-                if (currentTick - pending.removedAtTick() >= WINDOW_TICKS) {
+                if (currentTick - pending.removedAtTick() >= window) {
                     confirmed.add(pending);
                     return true;
                 }
@@ -136,7 +143,7 @@ public final class DestructionArbiter {
         // Проверка на пустоту не лишняя: тик идёт двадцать раз в секунду, а обе
         // памяти почти всегда пусты, и removeIf каждый раз заводил бы итератор.
         if (!recentAppearances.isEmpty()) {
-            recentAppearances.values().removeIf(tick -> currentTick - tick >= WINDOW_TICKS);
+            recentAppearances.values().removeIf(tick -> currentTick - tick >= window);
         }
     }
 
@@ -145,6 +152,11 @@ public final class DestructionArbiter {
         pendingRemovals.clear();
         recentAppearances.clear();
         currentTick = 0;
+    }
+
+    /** Сколько удалений и появлений ждёт подтверждения — для {@code /gimpanum stats}. */
+    public static int pending() {
+        return pendingRemovals.size() + recentAppearances.size();
     }
 
     public static int currentTick() {

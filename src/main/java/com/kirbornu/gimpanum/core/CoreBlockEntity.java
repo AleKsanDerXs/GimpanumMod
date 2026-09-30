@@ -1,6 +1,8 @@
 package com.kirbornu.gimpanum.core;
 
 import com.kirbornu.gimpanum.Gimpanum;
+import com.kirbornu.gimpanum.config.JsonConfig;
+import com.kirbornu.gimpanum.perf.PerformanceConfig;
 import com.kirbornu.gimpanum.destruction.DestructionArbiter;
 import com.kirbornu.gimpanum.item.SealItem;
 import com.kirbornu.gimpanum.registry.GimpanumContent;
@@ -18,11 +20,13 @@ import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.Optional;
@@ -209,7 +213,12 @@ public class CoreBlockEntity extends BlockEntity {
             spawnTimer = 0;
             return;
         }
-        if (++spawnTimer < spawn.intervalTicks()) {
+        // Нижняя граница интервала и потолок выдачи — из performance.json: без
+        // них ошибка в настройке (интервал в секунду, сотни предметов) за минуты
+        // забивает мир неуязвимыми предметными сущностями.
+        JsonConfig.Section limits = PerformanceConfig.of("core");
+        int interval = Math.max(spawn.intervalTicks(), limits.integer("spawn_min_interval_seconds") * 20);
+        if (++spawnTimer < interval) {
             return;
         }
         spawnTimer = 0;
@@ -219,6 +228,11 @@ public class CoreBlockEntity extends BlockEntity {
         }
         // Мировая позиция, а не BlockPos: на конструкции они разные.
         Vec3 worldPos = SubLevelSupport.worldCenter(level, worldPosition);
+        int pause = limits.integer("spawn_pause_items_nearby");
+        if (pause > 0 && serverLevel.getEntitiesOfClass(ItemEntity.class,
+                new AABB(worldPos, worldPos).inflate(8.0)).size() > pause) {
+            return;
+        }
 
         spawnItem(serverLevel, worldPos, spawn);
         // Тот же список команд, что и при гибели Ядра, — здесь он выполняется
@@ -241,7 +255,8 @@ public class CoreBlockEntity extends BlockEntity {
             }
             prototype = new ItemStack(item);
         }
-        SealDrops.spawnBatch(serverLevel, worldPos, prototype, spawn.count());
+        int cap = PerformanceConfig.of("core").integer("spawn_max_count");
+        SealDrops.spawnBatch(serverLevel, worldPos, prototype, cap > 0 ? Math.min(spawn.count(), cap) : spawn.count());
     }
 
     /**

@@ -1,28 +1,35 @@
 package com.kirbornu.gimpanum.dimension;
 
 import com.kirbornu.gimpanum.Gimpanum;
+import com.kirbornu.gimpanum.config.JsonConfig;
+import com.kirbornu.gimpanum.perf.ChunkLoads;
+import com.kirbornu.gimpanum.perf.PerformanceConfig;
 import com.kirbornu.gimpanum.registry.GimpanumContent;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.SectionPos;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.border.WorldBorder;
-import net.minecraft.world.level.chunk.ChunkAccess;
-import net.minecraft.world.level.chunk.status.ChunkStatus;
+import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraft.world.level.levelgen.structure.Structure;
 import net.minecraft.world.level.levelgen.structure.StructureSet;
 import net.minecraft.world.level.levelgen.structure.StructureStart;
 import net.minecraft.world.level.levelgen.structure.placement.RandomSpreadStructurePlacement;
 import net.minecraft.world.phys.AABB;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -31,6 +38,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * Куда и как переносит портальная арка.
@@ -51,6 +59,7 @@ import java.util.Set;
  * границе не знает и спокойно предложит ячейку за ней; выйти оттуда игрок уже
  * не сможет.
  */
+@EventBusSubscriber(modid = Gimpanum.MOD_ID)
 public final class NebulaPortal {
 
     public static final ResourceKey<Level> GIMPANUM =
@@ -61,12 +70,6 @@ public final class NebulaPortal {
 
     private static final ResourceKey<StructureSet> STRUCTURE_SET =
             ResourceKey.create(Registries.STRUCTURE_SET, Gimpanum.id("nebula_portal"));
-
-    /** Сколько ячеек сетки перебрать, прежде чем сдаться. */
-    private static final int ATTEMPTS = 12;
-
-    /** В скольких ячейках сетки от начала координат искать выход. */
-    private static final int REGION_RANGE = 24;
 
     /** Радиус поиска площадки у выхода. */
     private static final int FOOTING_RADIUS = 8;
@@ -84,6 +87,9 @@ public final class NebulaPortal {
     /** Сколько клеток плоскости обходить, собирая её целиком: в арке их полсотни. */
     private static final int PLANE_LIMIT = 128;
 
+    /** Кто сейчас ждёт перехода: повторный вход в арку не должен запускать второй поиск. */
+    private static final Set<UUID> PENDING = new HashSet<>();
+
     private NebulaPortal() {
     }
 
@@ -92,11 +98,29 @@ public final class NebulaPortal {
         return GIMPANUM.equals(from) ? Level.OVERWORLD : GIMPANUM;
     }
 
+    /** Сколько переходов сейчас ждут подгрузки чанков — для {@code /gimpanum stats}. */
+    public static int pending() {
+        return PENDING.size();
+    }
+
+    @SubscribeEvent
+    public static void onServerStopping(ServerStoppingEvent event) {
+        PENDING.clear();
+    }
+
     /**
-     * Переносит существо к случайному порталу на той стороне.
+     * Переносит существо к порталу на той стороне.
      *
-     * <p>Случайному, а не парному: связи «этот к тому» нет по замыслу, поэтому
-     * каждый вход — лотерея среди всех выходов, посещённых и нет.
+     * <p>Поиск выхода <b>не блокирует сервер</b>. Раньше здесь стояло до
+     * двенадцати синхронных {@code getChunk(FULL)} — каждое означало генерацию
+     * чанка на главном потоке, и переход через арку подвешивал весь сервер на
+     * секунды. Теперь нужные чанки заказываются через {@link ChunkLoads}, игра
+     * генерирует их на рабочих потоках, а сам переход завершается в том тике,
+     * когда всё готово. Если все чанки уже в памяти, переход мгновенный.
+     *
+     * <p>Выход по-прежнему случайный, но {@code portal.explore_chance} позволяет
+     * чаще брать уже известные порталы (проверенные на живость) и не гнать
+     * генерацию мира на десятки тысяч блоков от центра при каждом входе.
      */
     public static void teleport(ServerLevel from, Entity entity) {
         MinecraftServer server = from.getServer();
@@ -106,100 +130,261 @@ public final class NebulaPortal {
             Gimpanum.LOGGER.error("Портал: измерение {} не найдено", targetKey.location());
             return;
         }
-
-        Optional<BlockPos> destination = pick(server, target, entity.getRandom());
-        if (destination.isEmpty()) {
-            Gimpanum.LOGGER.warn("Портал: в {} не нашлось ни одного выхода", targetKey.location());
-            return;
-        }
-
-        List<BlockPos> plane = plane(target, destination.get());
-        BlockPos spot = footing(target, plane);
-        // Не разговорчивость, а следы: когда выход окажется не там, где ждали,
-        // без этих трёх чисел причину искать нечем.
-        Gimpanum.LOGGER.debug("Портал: выход {}, подножие плоскости {}, площадка {}",
-                destination.get(), anchor(plane), spot);
-        entity.setPortalCooldown();
-        entity.teleportTo(target, spot.getX() + 0.5, spot.getY(), spot.getZ() + 0.5,
-                Set.of(), facingAway(plane, spot), entity.getXRot());
+        teleport(from, target, entity);
     }
 
-    /** Случайный выход: сперва по сетке размещения, затем — среди посещённых. */
-    private static Optional<BlockPos> pick(MinecraftServer server, ServerLevel target, RandomSource random) {
-        Optional<RandomSpreadStructurePlacement> placement = placement(target);
-        Optional<Structure> structure = target.registryAccess()
-                .registryOrThrow(Registries.STRUCTURE).getOptional(STRUCTURE);
+    /** То же с явным измерением назначения: пара «Гимпанум — верхний мир» зашита в {@link #other}, а тестам нужен произвольный мир. */
+    public static void teleport(ServerLevel from, ServerLevel target, Entity entity) {
+        if (!PENDING.add(entity.getUUID())) {
+            return;
+        }
+        entity.setPortalCooldown();
+        Search search = new Search(from.getServer(), target, entity, from.dimension());
+        try {
+            search.start();
+        } catch (Throwable failure) {
+            search.fail("исключение при старте поиска", failure);
+        }
+    }
 
-        WorldBorder border = target.getWorldBorder();
+    /** Один переход: цепочка асинхронных шагов, сходящаяся к {@code finish}. */
+    private static final class Search {
+        private final MinecraftServer server;
+        private final ServerLevel target;
+        private final UUID entityId;
+        private final ResourceKey<Level> fromKey;
+        private final RandomSource random;
+        private final JsonConfig.Section config = PerformanceConfig.of("portal");
+        private final long deadlineMillis;
+        private final List<BlockPos> triedKnown = new ArrayList<>();
+        private int attempts;
+        private int validations;
 
-        if (placement.isPresent() && structure.isPresent()) {
-            // Метод ждёт координаты чанка, а не номер ячейки, и сам делит их
-            // на шаг сетки. Раньше сюда шли номера ячеек как есть — от −24 до
-            // 24 чанков, — и после деления оставалось всего четыре ячейки у
-            // начала координат: «случайный» выход выбирал из четырёх арок.
-            int spacing = placement.get().spacing();
-            for (int attempt = 0; attempt < ATTEMPTS; attempt++) {
-                ChunkPos candidate = placement.get().getPotentialStructureChunk(
-                        target.getSeed(),
-                        cellX(border, spacing, random) * spacing,
-                        cellZ(border, spacing, random) * spacing);
-                if (!border.isWithinBounds(candidate)) {
-                    continue;
-                }
-                Optional<BlockPos> portal = portalAt(target, candidate, structure.get())
-                        .filter(pos -> inside(border, pos));
-                if (portal.isPresent()) {
-                    return portal;
-                }
+        Search(MinecraftServer server, ServerLevel target, Entity entity, ResourceKey<Level> fromKey) {
+            this.server = server;
+            this.target = target;
+            this.entityId = entity.getUUID();
+            this.fromKey = fromKey;
+            this.random = entity.getRandom();
+            this.deadlineMillis = System.currentTimeMillis() + Math.max(1, config.integer("wait_seconds")) * 1000L;
+            this.attempts = Math.max(0, config.integer("max_attempts"));
+            this.validations = Math.max(1, config.integer("validate_attempts"));
+            if (entity instanceof ServerPlayer player) {
+                say(player, "gimpanum.portal.opening");
             }
         }
 
-        List<BlockPos> known = PortalIndex.in(server, target.dimension()).stream()
-                .filter(pos -> inside(border, pos))
-                .toList();
-        return known.isEmpty()
-                ? Optional.empty()
-                : Optional.of(known.get(random.nextInt(known.size())));
+        void start() {
+            List<BlockPos> known = known();
+            boolean explore = known.isEmpty() || random.nextDouble() < config.number("explore_chance");
+            if (explore) {
+                explore();
+            } else {
+                validateKnown();
+            }
+        }
+
+        private boolean expired() {
+            return System.currentTimeMillis() > deadlineMillis;
+        }
+
+        /** Известные порталы этого измерения, что ещё не проверялись и лежат внутри границы. */
+        private List<BlockPos> known() {
+            WorldBorder border = target.getWorldBorder();
+            List<BlockPos> found = new ArrayList<>();
+            for (BlockPos pos : PortalIndex.in(server, target.dimension())) {
+                if (!triedKnown.contains(pos) && inside(border, pos)) {
+                    found.add(pos);
+                }
+            }
+            return found;
+        }
+
+        /** Шаг поиска новой арки: кандидат сетки, его начало, чанки структуры, блок портала. */
+        private void explore() {
+            Optional<RandomSpreadStructurePlacement> placement = placement(target);
+            Optional<Structure> structure = target.registryAccess()
+                    .registryOrThrow(Registries.STRUCTURE).getOptional(STRUCTURE);
+            if (placement.isEmpty() || structure.isEmpty() || attempts <= 0 || expired()) {
+                validateKnown();
+                return;
+            }
+            attempts--;
+
+            WorldBorder border = target.getWorldBorder();
+            int spacing = placement.get().spacing();
+            int range = Math.max(1, config.integer("region_range"));
+            ChunkPos candidate = placement.get().getPotentialStructureChunk(
+                    target.getSeed(),
+                    cell(border.getMinX(), border.getMaxX(), spacing, range, random) * spacing,
+                    cell(border.getMinZ(), border.getMaxZ(), spacing, range, random) * spacing);
+            if (!border.isWithinBounds(candidate)) {
+                explore();
+                return;
+            }
+            ChunkLoads.request(target, candidate, ok -> guarded(() -> {
+                Optional<BoundingBox> box = ok ? startBox(candidate, structure.get()) : Optional.empty();
+                if (box.isEmpty()) {
+                    explore();
+                    return;
+                }
+                ChunkLoads.request(target, chunksOf(box.get()), ready -> guarded(() -> {
+                    Optional<BlockPos> portal = ready ? portalIn(box.get()) : Optional.empty();
+                    if (portal.isPresent() && inside(border, portal.get())) {
+                        arrive(portal.get());
+                    } else {
+                        explore();
+                    }
+                }));
+            }));
+        }
+
+        /** Взять известный портал, убедившись, что арка на месте. Мёртвые записи из указателя уходят. */
+        private void validateKnown() {
+            List<BlockPos> known = known();
+            if (known.isEmpty() || validations <= 0 || expired()) {
+                fail("не нашлось ни одного выхода (известных: " + known.size() + ", проверок осталось: "
+                        + validations + ", срок вышел: " + expired() + ")", null);
+                return;
+            }
+            validations--;
+            BlockPos pos = known.get(random.nextInt(known.size()));
+            triedKnown.add(pos);
+            ChunkLoads.request(target, ring(pos), ok -> guarded(() -> {
+                if (ok && target.getBlockState(pos).is(GimpanumContent.NEBULA_PORTAL.get())) {
+                    finish(pos);
+                    return;
+                }
+                if (ok) {
+                    PortalIndex.remove(server, target.dimension(), pos);
+                }
+                validateKnown();
+            }));
+        }
+
+        /** Выход найден; осталось убедиться, что вокруг него загружены чанки для площадки. */
+        private void arrive(BlockPos portal) {
+            ChunkLoads.request(target, ring(portal), ok -> guarded(() -> {
+                if (ok) {
+                    finish(portal);
+                } else {
+                    fail("не дождались чанков выхода", null);
+                }
+            }));
+        }
+
+        private void finish(BlockPos portal) {
+            Entity entity = entity();
+            PENDING.remove(entityId);
+            if (entity == null) {
+                return;
+            }
+            List<BlockPos> plane = plane(target, portal);
+            BlockPos spot = footing(target, plane);
+            Gimpanum.LOGGER.debug("Портал: выход {}, подножие плоскости {}, площадка {}",
+                    portal, anchor(plane), spot);
+            entity.setPortalCooldown();
+            entity.teleportTo(target, spot.getX() + 0.5, spot.getY(), spot.getZ() + 0.5,
+                    Set.of(), facingAway(plane, spot), entity.getXRot());
+        }
+
+        /** Тот, кого переносим, если он ещё в игре. */
+        private Entity entity() {
+            ServerPlayer player = server.getPlayerList().getPlayer(entityId);
+            if (player != null) {
+                return player.isAlive() && !player.hasDisconnected() ? player : null;
+            }
+            ServerLevel from = server.getLevel(fromKey);
+            Entity found = from == null ? null : from.getEntity(entityId);
+            return found != null && found.isAlive() && !found.isRemoved() ? found : null;
+        }
+
+        private void guarded(Runnable step) {
+            try {
+                step.run();
+            } catch (Throwable failure) {
+                fail("исключение в шаге поиска", failure);
+            }
+        }
+
+        void fail(String reason, Throwable failure) {
+            PENDING.remove(entityId);
+            if (failure != null) {
+                Gimpanum.LOGGER.error("Портал: {}", reason, failure);
+            } else {
+                Gimpanum.LOGGER.warn("Портал: в {} {}", target.dimension().location(), reason);
+            }
+            ServerPlayer player = server.getPlayerList().getPlayer(entityId);
+            if (player != null) {
+                say(player, "gimpanum.portal.failed");
+            }
+        }
+
+        private static void say(ServerPlayer player, String key) {
+            player.displayClientMessage(Component.translatable(key), true);
+        }
+
+        /** Габарит начала структуры в этом чанке, если оно есть и годится. Чанк уже загружен. */
+        private Optional<BoundingBox> startBox(ChunkPos candidate, Structure structure) {
+            LevelChunk chunk = target.getChunkSource().getChunkNow(candidate.x, candidate.z);
+            if (chunk == null) {
+                return Optional.empty();
+            }
+            StructureStart start = target.structureManager()
+                    .getStartForStructure(SectionPos.bottomOf(chunk), structure, chunk);
+            return start == null || !start.isValid() ? Optional.empty() : Optional.of(start.getBoundingBox());
+        }
+
+        /** Блок портала внутри габарита. Все его чанки уже загружены. */
+        private Optional<BlockPos> portalIn(BoundingBox box) {
+            for (ChunkPos pos : chunksOf(box)) {
+                LevelChunk piece = target.getChunkSource().getChunkNow(pos.x, pos.z);
+                if (piece == null) {
+                    continue;
+                }
+                for (BlockPos blockPos : piece.getBlockEntitiesPos()) {
+                    if (box.isInside(blockPos)
+                            && piece.getBlockState(blockPos).is(GimpanumContent.NEBULA_PORTAL.get())) {
+                        return Optional.of(blockPos.immutable());
+                    }
+                }
+            }
+            return Optional.empty();
+        }
     }
 
-    /**
-     * Случайная ячейка сетки по X — из тех, что не дальше {@value #REGION_RANGE}
-     * от начала координат и хотя бы краем лежат под границей.
-     *
-     * <p>Без поправки на границу узкий мир почти целиком отбраковывался бы:
-     * при границе в десять тысяч блоков под неё попадает одна ячейка из сотни,
-     * и дюжина попыток уходила бы впустую.
-     */
-    private static int cellX(WorldBorder border, int spacing, RandomSource random) {
-        return cell(border.getMinX(), border.getMaxX(), spacing, random);
+    /** Чанки 3×3 вокруг точки: площадке хватает блоков в радиусе восьми. */
+    private static List<ChunkPos> ring(BlockPos pos) {
+        ChunkPos centre = new ChunkPos(pos);
+        List<ChunkPos> chunks = new ArrayList<>(9);
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                chunks.add(new ChunkPos(centre.x + dx, centre.z + dz));
+            }
+        }
+        return chunks;
     }
 
-    private static int cellZ(WorldBorder border, int spacing, RandomSource random) {
-        return cell(border.getMinZ(), border.getMaxZ(), spacing, random);
+    private static List<ChunkPos> chunksOf(BoundingBox box) {
+        List<ChunkPos> chunks = new ArrayList<>();
+        for (int cx = box.minX() >> 4; cx <= box.maxX() >> 4; cx++) {
+            for (int cz = box.minZ() >> 4; cz <= box.maxZ() >> 4; cz++) {
+                chunks.add(new ChunkPos(cx, cz));
+            }
+        }
+        return chunks;
     }
 
-    private static int cell(double min, double max, int spacing, RandomSource random) {
-        int low = Math.max(-REGION_RANGE, Math.floorDiv(Mth.floor(min) >> 4, spacing));
-        int high = Math.min(REGION_RANGE, Math.floorDiv((Mth.ceil(max) - 1) >> 4, spacing));
+    private static int cell(double min, double max, int spacing, int range, RandomSource random) {
+        int low = Math.max(-range, Math.floorDiv(Mth.floor(min) >> 4, spacing));
+        int high = Math.min(range, Math.floorDiv((Mth.ceil(max) - 1) >> 4, spacing));
         return high < low ? low : low + random.nextInt(high - low + 1);
     }
 
-    /**
-     * Блок целиком под границей.
-     *
-     * <p>Не угол: граница проверяется по углу блока, а ставим мы в его
-     * середину, и у самой черты пришедший оказался бы на полблока снаружи.
-     */
     private static boolean inside(WorldBorder border, BlockPos pos) {
         return border.isWithinBounds(new AABB(pos));
     }
 
-    /**
-     * Ближайший блок, целиком лежащий под границей.
-     *
-     * <p>Не ванильный {@code clampToBounds}: тот прижимает к самой черте, а она
-     * может проходить посреди блока.
-     */
     private static BlockPos clampInside(WorldBorder border, BlockPos pos) {
         int x = Mth.clamp(pos.getX(), Mth.ceil(border.getMinX()), Mth.floor(border.getMaxX()) - 1);
         int z = Mth.clamp(pos.getZ(), Mth.ceil(border.getMinZ()), Mth.floor(border.getMaxZ()) - 1);
@@ -212,39 +397,6 @@ public final class NebulaPortal {
                 .map(StructureSet::placement)
                 .filter(RandomSpreadStructurePlacement.class::isInstance)
                 .map(RandomSpreadStructurePlacement.class::cast);
-    }
-
-    /**
-     * Настоящий блок портала в указанном чанке-кандидате.
-     *
-     * <p>Ищем не перебором всего чанка, а по списку блок-сущностей: у плоскости
-     * перехода она есть, и таких блоков в чанке единицы.
-     */
-    private static Optional<BlockPos> portalAt(ServerLevel target, ChunkPos candidate, Structure structure) {
-        try {
-            ChunkAccess chunk = target.getChunk(candidate.x, candidate.z, ChunkStatus.FULL, true);
-            StructureStart start = target.structureManager()
-                    .getStartForStructure(SectionPos.bottomOf(chunk), structure, chunk);
-            if (start == null || !start.isValid()) {
-                return Optional.empty();
-            }
-            BoundingBox box = start.getBoundingBox();
-            for (int cx = box.minX() >> 4; cx <= box.maxX() >> 4; cx++) {
-                for (int cz = box.minZ() >> 4; cz <= box.maxZ() >> 4; cz++) {
-                    ChunkAccess piece = target.getChunk(cx, cz, ChunkStatus.FULL, true);
-                    for (BlockPos pos : piece.getBlockEntitiesPos()) {
-                        if (box.isInside(pos)
-                                && piece.getBlockState(pos).is(GimpanumContent.NEBULA_PORTAL.get())) {
-                            return Optional.of(pos.immutable());
-                        }
-                    }
-                }
-            }
-            return Optional.empty();
-        } catch (Throwable failure) {
-            Gimpanum.LOGGER.error("Портал: чанк {} не выдал выхода", candidate, failure);
-            return Optional.empty();
-        }
     }
 
     /**

@@ -1,6 +1,10 @@
 package com.kirbornu.gimpanum.entity.goal;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.kirbornu.gimpanum.config.JsonConfig;
 import com.kirbornu.gimpanum.dimension.VolatileGasBlock;
+import com.kirbornu.gimpanum.perf.PerformanceConfig;
 import com.kirbornu.gimpanum.registry.GimpanumContent;
 import net.minecraft.core.BlockPos;
 import net.minecraft.sounds.SoundSource;
@@ -12,10 +16,10 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
+import it.unimi.dsi.fastutil.longs.LongArrayList;
+import net.neoforged.neoforge.event.EventHooks;
 
-import java.util.ArrayList;
 import java.util.EnumSet;
-import java.util.List;
 
 /**
  * Непрерывное бурение к цели.
@@ -74,6 +78,16 @@ public class DevourBlocksGoal extends Goal {
     private int needed;
     private int soundCooldown;
 
+    /** Сколько тиков осталось до следующего поиска преграды, если впереди было пусто. */
+    private int idle;
+
+    private long nextPermissionCheck;
+
+    private boolean allowed = true;
+
+    /** Блоки укуса этого тика; переиспользуется, чтобы не плодить списки. */
+    private final LongArrayList mouthful = new LongArrayList();
+
     public DevourBlocksGoal(Mob mob) {
         this.mob = mob;
         this.setFlags(EnumSet.of(Goal.Flag.JUMP));
@@ -99,6 +113,39 @@ public class DevourBlocksGoal extends Goal {
     public void stop() {
         progress = 0;
         needed = 0;
+        idle = 0;
+    }
+
+    /**
+     * Можно ли сейчас грызть: настройка, измерение, правило mobGriefing.
+     *
+     * <p>Проверяется раз в секунду, а не каждый тик: событие о вредительстве
+     * мобов не бесплатно, а ответ меняется редко.
+     */
+    private boolean digAllowed(Level level) {
+        long now = level.getGameTime();
+        if (now < nextPermissionCheck) {
+            return allowed;
+        }
+        nextPermissionCheck = now + 20;
+        JsonConfig.Section config = PerformanceConfig.of("devourer");
+        boolean ok = config.bool("dig_enabled");
+        JsonArray dimensions = config.list("dimensions");
+        if (ok && !dimensions.isEmpty()) {
+            ok = false;
+            String here = level.dimension().location().toString();
+            for (JsonElement element : dimensions) {
+                if (element.getAsString().equals(here)) {
+                    ok = true;
+                    break;
+                }
+            }
+        }
+        if (ok && config.bool("respect_mob_griefing")) {
+            ok = EventHooks.canEntityGrief(level, mob);
+        }
+        allowed = ok;
+        return ok;
     }
 
     @Override
@@ -108,29 +155,47 @@ public class DevourBlocksGoal extends Goal {
             return;
         }
         Level level = mob.level();
+        if (!digAllowed(level)) {
+            progress = 0;
+            needed = 0;
+            return;
+        }
+        if (idle > 0) {
+            idle--;
+            return;
+        }
+        JsonConfig.Section config = PerformanceConfig.of("devourer");
+        int bite = Math.max(1, config.integer("bite_radius"));
         BlockPos centre = BlockPos.containing(mouth(target));
 
         // Один обход сферы на тик: заодно и что грызть, и насколько крепкое.
-        List<BlockPos> mouthful = new ArrayList<>();
+        // Позиции копятся числами и без промежуточных объектов: обход идёт каждый тик.
+        mouthful.clear();
         float hardest = 0.0F;
-        for (BlockPos pos : BlockPos.betweenClosed(centre.offset(-BITE, -BITE, -BITE),
-                centre.offset(BITE, BITE, BITE))) {
-            if (centre.distSqr(pos) > (double) BITE * BITE) {
-                continue;
-            }
-            BlockState state = level.getBlockState(pos);
-            if (state.isAir()) {
-                continue;
-            }
-            float hardness = state.getDestroySpeed(level, pos);
-            if (hardness < 0.0F) {
-                // Неразрушимое не считается и во время укуса: иначе врата
-                // рядом со стеной делали бы стену вечной.
-                continue;
-            }
-            mouthful.add(pos.immutable());
-            if (hardness > hardest) {
-                hardest = hardness;
+        double reach = (double) bite * bite;
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        for (int dx = -bite; dx <= bite; dx++) {
+            for (int dy = -bite; dy <= bite; dy++) {
+                for (int dz = -bite; dz <= bite; dz++) {
+                    if (dx * dx + dy * dy + dz * dz > reach) {
+                        continue;
+                    }
+                    cursor.set(centre.getX() + dx, centre.getY() + dy, centre.getZ() + dz);
+                    BlockState state = level.getBlockState(cursor);
+                    if (state.isAir()) {
+                        continue;
+                    }
+                    float hardness = state.getDestroySpeed(level, cursor);
+                    if (hardness < 0.0F) {
+                        // Неразрушимое не считается и во время укуса: иначе врата
+                        // рядом со стеной делали бы стену вечной.
+                        continue;
+                    }
+                    mouthful.add(cursor.asLong());
+                    if (hardness > hardest) {
+                        hardest = hardness;
+                    }
+                }
             }
         }
 
@@ -141,6 +206,8 @@ public class DevourBlocksGoal extends Goal {
             // Впереди пусто — летим дальше, отсчёт укуса начинается заново.
             progress = 0;
             needed = 0;
+            // Пока впереди пусто, преграду можно искать реже.
+            idle = Math.max(1, config.integer("scan_interval_ticks")) - 1;
             return;
         }
 
@@ -153,11 +220,12 @@ public class DevourBlocksGoal extends Goal {
         progress = 0;
         needed = 0;
 
-        BlockState sample = level.getBlockState(mouthful.get(0));
+        BlockPos first = BlockPos.of(mouthful.getLong(0));
+        BlockState sample = level.getBlockState(first);
         if (soundCooldown <= 0) {
             // Звук разрушения, а не удара: удар — это кирка по камню, а тут
             // камень исчезает целиком.
-            level.playSound(null, centre, sample.getSoundType(level, mouthful.get(0), mob).getBreakSound(),
+            level.playSound(null, centre, sample.getSoundType(level, first, mob).getBreakSound(),
                     SoundSource.HOSTILE, CRUNCH, 0.5F + mob.getRandom().nextFloat() * 0.3F);
             soundCooldown = SOUND_INTERVAL;
         }
@@ -173,7 +241,11 @@ public class DevourBlocksGoal extends Goal {
         // клиент и сервер в одном процессе, это и выглядит как падение TPS.
         level.levelEvent(2001, centre, Block.getId(sample));
 
-        for (BlockPos pos : mouthful) {
+        // Потолок блоков за тик (0 — без потолка): остаток догрызётся следующим укусом.
+        int limit = config.integer("max_blocks_per_tick");
+        int count = limit > 0 ? Math.min(mouthful.size(), limit) : mouthful.size();
+        for (int i = 0; i < count; i++) {
+            BlockPos pos = BlockPos.of(mouthful.getLong(i));
             // Летучий газ не глотается, а вспыхивает у самой пасти.
             if (level.getBlockState(pos).is(GimpanumContent.VOLATILE_NEBULA_GAS.get())) {
                 VolatileGasBlock.disturb(level, pos);

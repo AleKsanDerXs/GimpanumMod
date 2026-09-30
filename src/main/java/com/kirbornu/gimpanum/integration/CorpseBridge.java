@@ -1,6 +1,8 @@
 package com.kirbornu.gimpanum.integration;
 
 import com.kirbornu.gimpanum.Gimpanum;
+import com.kirbornu.gimpanum.perf.ChunkLoads;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceKey;
@@ -61,6 +63,7 @@ public final class CorpseBridge {
     private static Method getPlayerUUID;
     private static Class<?> corpseEntity;
     private static Method getCorpseUUID;
+    private static Method getDeathOf;
 
     private CorpseBridge() {
     }
@@ -76,13 +79,34 @@ public final class CorpseBridge {
      * <p>Пусто — значит трупа нет, он уже разграблен или Corpse не установлен.
      * Во всех трёх случаях Талисман тратить не за что.
      */
-    public static List<ItemStack> reclaim(ServerPlayer player) {
+    /**
+     * Итог попытки вернуть вещи.
+     *
+     * @param loading чанк с трупом ещё не загружен: он заказан без ожидания, и
+     *                попытку надо повторить через пару секунд
+     */
+    public record Result(List<ItemStack> loot, boolean loading) {
+        static final Result EMPTY = new Result(List.of(), false);
+        static final Result LOADING = new Result(List.of(), true);
+    }
+
+    public static Result reclaim(ServerPlayer player) {
         if (!available()) {
-            return List.of();
+            return Result.EMPTY;
         }
         try {
             Object death = newest(player);
             ServerLevel level = death == null ? null : levelOf(player.server, death);
+            // Труп может лежать в выгруженном чанке, а читать его с диска прямо тут значило
+            // бы остановить сервер на время чтения. Чанк заказывается без ожидания, а вещи
+            // возвращаются со следующего использования.
+            if (level != null) {
+                BlockPos deathPos = (BlockPos) getBlockPos.invoke(death);
+                if (!level.hasChunkAt(deathPos)) {
+                    ChunkLoads.request(level, new ChunkPos(deathPos), ok -> { });
+                    return Result.LOADING;
+                }
+            }
             Entity corpse = level == null ? null : corpseFor(level, death);
 
             // Запись в папке мира — не единственный источник и не главный.
@@ -106,13 +130,13 @@ public final class CorpseBridge {
             if (source == null) {
                 Gimpanum.LOGGER.debug("Талисман: у {} нет ни записи о смерти, ни трупа поблизости",
                         player.getGameProfile().getName());
-                return List.of();
+                return Result.EMPTY;
             }
 
             List<ItemStack> loot = items(source);
             if (loot.isEmpty()) {
                 Gimpanum.LOGGER.debug("Талисман: труп {} найден, но пуст", player.getGameProfile().getName());
-                return List.of();
+                return Result.EMPTY;
             }
             if (corpse != null) {
                 corpse.discard();
@@ -120,10 +144,10 @@ public final class CorpseBridge {
             if (level != null && death != null) {
                 removeDeath.invoke(null, level, death);
             }
-            return loot;
+            return new Result(loot, false);
         } catch (Throwable failure) {
             Gimpanum.LOGGER.error("Талисман не сумел добраться до трупа через мод Corpse", failure);
-            return List.of();
+            return Result.EMPTY;
         }
     }
 
@@ -189,7 +213,6 @@ public final class CorpseBridge {
     private static Entity corpseFor(ServerLevel level, Object death) throws Exception {
         BlockPos pos = (BlockPos) getBlockPos.invoke(death);
         UUID id = (UUID) getId.invoke(death);
-        level.getChunk(pos);
         AABB box = new AABB(pos).inflate(SEARCH_RADIUS);
         for (Entity entity : level.getEntities((Entity) null, box, e -> corpseEntity.isInstance(e))) {
             Object found = getCorpseUUID.invoke(entity);
@@ -201,7 +224,7 @@ public final class CorpseBridge {
     }
 
     private static Object getDeath(Entity corpse) throws Exception {
-        return corpseEntity.getMethod("getDeath").invoke(corpse);
+        return getDeathOf.invoke(corpse);
     }
 
     private static List<ItemStack> items(Object death) throws Exception {
@@ -244,6 +267,7 @@ public final class CorpseBridge {
             getBlockPos = death.getMethod("getBlockPos");
             getPlayerUUID = death.getMethod("getPlayerUUID");
             getCorpseUUID = corpseEntity.getMethod("getCorpseUUID");
+            getDeathOf = corpseEntity.getMethod("getDeath");
             working = true;
         } catch (Throwable failure) {
             Gimpanum.LOGGER.warn("Мод Corpse есть, но его устройство изменилось — "

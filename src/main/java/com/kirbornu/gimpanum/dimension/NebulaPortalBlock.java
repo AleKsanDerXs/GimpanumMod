@@ -68,6 +68,16 @@ public class NebulaPortalBlock extends Block implements EntityBlock {
         }
     }
 
+    /** Снятая арка вычёркивается из указателя порталов. */
+    @Override
+    protected void onRemove(BlockState state, Level level, BlockPos pos,
+                            BlockState newState, boolean movedByPiston) {
+        if (!state.is(newState.getBlock()) && !level.isClientSide && level.getServer() != null) {
+            PortalIndex.remove(level.getServer(), level.dimension(), pos);
+        }
+        super.onRemove(state, level, pos, newState, movedByPiston);
+    }
+
     @Override
     public PushReaction getPistonPushReaction(BlockState state) {
         return PushReaction.BLOCK;

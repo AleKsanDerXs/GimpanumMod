@@ -88,7 +88,7 @@ public class ConverterBlock extends Block implements EntityBlock {
                             BlockState newState, boolean movedByPiston) {
         if (!state.is(newState.getBlock()) && !level.isClientSide && level.getServer() != null) {
             ConverterIndex.remove(level.getServer(), level.dimension(), pos);
-            GimpanumNetwork.broadcastMarkers(level.getServer());
+            GimpanumNetwork.requestMarkerBroadcast();
         }
         super.onRemove(state, level, pos, newState, movedByPiston);
     }

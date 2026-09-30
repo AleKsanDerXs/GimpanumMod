@@ -86,15 +86,63 @@ public final class CoreCommand {
     /**
      * Как добраться до Ядра: по имени или по координатам.
      *
-     * <p>{@code allowChunkLoad} различает исполнение команды и построение
-     * подсказок. Подсказки строятся на каждое нажатие клавиши, и подгрузка
-     * чанков оттуда уронила бы сервер.
+     * <p>Два вопроса разделены. {@link #targets} отвечает по указателю, без
+     * чанков: кто вообще имеется в виду (или ошибка адресации). {@link #loaded}
+     * отдаёт только уже загруженные блоки — для подсказок, которые строятся на
+     * каждое нажатие клавиши. Сами блоки выгруженных Ядер команда подгружает
+     * через {@link CoreIndex#resolveAsync}: главный поток на чтение чанка не
+     * ждёт.
      */
-    @FunctionalInterface
     private interface CoreResolver {
-        List<CoreBlockEntity> resolve(CommandContext<CommandSourceStack> context, boolean allowChunkLoad)
-                throws CommandSyntaxException;
+        List<UUID> targets(CommandContext<CommandSourceStack> context) throws CommandSyntaxException;
+
+        List<CoreBlockEntity> loaded(CommandContext<CommandSourceStack> context) throws CommandSyntaxException;
     }
+
+    private static final CoreResolver BY_NAME = new CoreResolver() {
+        @Override
+        public List<UUID> targets(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+            String selector = StringArgumentType.getString(context, "core");
+            MinecraftServer server = context.getSource().getServer();
+            if (CoreIndex.isPattern(selector)) {
+                List<UUID> matched = CoreIndex.idsMatching(server, selector);
+                if (matched.isEmpty()) {
+                    throw ERROR_NO_MATCH.create();
+                }
+                return matched;
+            }
+            return List.of(CoreIndex.idOf(server, selector).orElseThrow(ERROR_UNKNOWN_CORE::create));
+        }
+
+        @Override
+        public List<CoreBlockEntity> loaded(CommandContext<CommandSourceStack> context)
+                throws CommandSyntaxException {
+            String selector = StringArgumentType.getString(context, "core");
+            MinecraftServer server = context.getSource().getServer();
+            if (CoreIndex.isPattern(selector)) {
+                return CoreIndex.findMatching(server, selector);
+            }
+            return List.of(CoreIndex.find(server, selector).orElseThrow(ERROR_UNKNOWN_CORE::create));
+        }
+    };
+
+    private static final CoreResolver BY_POSITION = new CoreResolver() {
+        @Override
+        public List<UUID> targets(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+            return List.of(loaded(context).get(0).coreId());
+        }
+
+        @Override
+        public List<CoreBlockEntity> loaded(CommandContext<CommandSourceStack> context)
+                throws CommandSyntaxException {
+            BlockPos pos = BlockPosArgument.getLoadedBlockPos(context, "pos");
+            Level level = context.getSource().getLevel();
+            if (!(level.getBlockEntity(pos) instanceof CoreBlockEntity core)) {
+                throw ERROR_NOT_A_CORE.create();
+            }
+            return List.of(core);
+        }
+    };
 
     private CoreCommand() {
     }
@@ -110,7 +158,7 @@ public final class CoreCommand {
         return (context, builder) -> {
             Set<String> names = new LinkedHashSet<>();
             try {
-                for (CoreBlockEntity core : resolver.resolve(context, false)) {
+                for (CoreBlockEntity core : resolver.loaded(context)) {
                     names.addAll(core.config().boundPlayers());
                 }
             } catch (Exception ignored) {
@@ -149,11 +197,11 @@ public final class CoreCommand {
 
         core.then(subcommands(
                 Commands.argument("core", StringArgumentType.word()).suggests(CORE_NAMES),
-                CoreCommand::byName, buildContext));
+                BY_NAME, buildContext));
 
         core.then(Commands.literal("at").then(subcommands(
                 Commands.argument("pos", BlockPosArgument.blockPos()),
-                CoreCommand::byPosition, buildContext)));
+                BY_POSITION, buildContext)));
 
         root.then(core);
     }
@@ -270,46 +318,6 @@ public final class CoreCommand {
 
     // --- Адресация -----------------------------------------------------------
 
-    private static List<CoreBlockEntity> byName(CommandContext<CommandSourceStack> context,
-                                                boolean allowChunkLoad) throws CommandSyntaxException {
-        String selector = StringArgumentType.getString(context, "core");
-        MinecraftServer server = context.getSource().getServer();
-
-        if (CoreIndex.isPattern(selector)) {
-            List<CoreBlockEntity> matched = CoreIndex.findMatching(server, selector, allowChunkLoad);
-            if (matched.isEmpty()) {
-                throw ERROR_NO_MATCH.create();
-            }
-            return matched;
-        }
-        return List.of(CoreIndex.find(server, selector, allowChunkLoad)
-                .orElseThrow(ERROR_UNKNOWN_CORE::create));
-    }
-
-    private static List<CoreBlockEntity> byPosition(CommandContext<CommandSourceStack> context,
-                                                    boolean allowChunkLoad) throws CommandSyntaxException {
-        BlockPos pos = BlockPosArgument.getLoadedBlockPos(context, "pos");
-        Level level = context.getSource().getLevel();
-        if (!(level.getBlockEntity(pos) instanceof CoreBlockEntity core)) {
-            throw ERROR_NOT_A_CORE.create();
-        }
-        return List.of(core);
-    }
-
-    /**
-     * Ровно одно Ядро — для действий, которые нельзя выполнить над многими.
-     *
-     * <p>Переименование именно такое: имя обязано быть уникальным, и образцом
-     * назначить всем Ядрам одно имя было бы прямой порчей указателя.
-     */
-    private static CoreBlockEntity requireSingle(List<CoreBlockEntity> cores)
-            throws CommandSyntaxException {
-        if (cores.size() != 1) {
-            throw ERROR_PATTERN_NOT_ALLOWED.create();
-        }
-        return cores.get(0);
-    }
-
     // --- Подкоманды ----------------------------------------------------------
 
     private static int list(CommandContext<CommandSourceStack> context) {
@@ -335,21 +343,29 @@ public final class CoreCommand {
     private static int apply(CommandContext<CommandSourceStack> context, CoreResolver resolver,
                              UnaryOperator<CoreConfig> change,
                              IntFunction<Component> message) throws CommandSyntaxException {
-        List<CoreBlockEntity> cores = resolver.resolve(context, true);
-        for (CoreBlockEntity core : cores) {
-            core.setConfig(change.apply(core.config()));
-        }
-        int count = cores.size();
-        context.getSource().sendSuccess(() -> message.apply(count), true);
-        return count;
+        List<UUID> ids = resolver.targets(context);
+        CommandSourceStack source = context.getSource();
+        int[] done = {-1};
+        CoreIndex.resolveAsync(source.getServer(), ids, cores -> {
+            for (CoreBlockEntity core : cores) {
+                core.setConfig(change.apply(core.config()));
+            }
+            int count = cores.size();
+            source.sendSuccess(() -> message.apply(count), true);
+            done[0] = count;
+        });
+        // Чанки загружены — ответ уже дан; иначе он придёт следом, когда подгрузятся.
+        return done[0] >= 0 ? done[0] : ids.size();
     }
 
     private static int show(CommandContext<CommandSourceStack> context, CoreResolver resolver)
             throws CommandSyntaxException {
         CommandSourceStack source = context.getSource();
-        for (CoreBlockEntity core : resolver.resolve(context, true)) {
-            describe(source, core.config());
-        }
+        CoreIndex.resolveAsync(source.getServer(), resolver.targets(context), cores -> {
+            for (CoreBlockEntity core : cores) {
+                describe(source, core.config());
+            }
+        });
         return 1;
     }
 
@@ -402,43 +418,47 @@ public final class CoreCommand {
     /** Переименование работает только над одним Ядром: имена уникальны. */
     private static int rename(CommandContext<CommandSourceStack> context, CoreResolver resolver)
             throws CommandSyntaxException {
-        CoreBlockEntity core = requireSingle(resolver.resolve(context, true));
+        List<UUID> ids = resolver.targets(context);
+        if (ids.size() != 1) {
+            throw ERROR_PATTERN_NOT_ALLOWED.create();
+        }
         String newName = StringArgumentType.getString(context, "new_name");
+        CommandSourceStack source = context.getSource();
 
-        if (CoreIndex.isNameTaken(context.getSource().getServer(), newName, core.coreId())) {
+        if (CoreIndex.isNameTaken(source.getServer(), newName, ids.get(0))) {
             throw ERROR_NAME_TAKEN.create();
         }
-        core.setConfig(core.config().withName(newName));
-        context.getSource().sendSuccess(
-                () -> Component.translatable("gimpanum.command.renamed", newName), true);
+        CoreIndex.resolveAsync(source.getServer(), ids, cores -> {
+            if (cores.isEmpty()) {
+                source.sendFailure(Component.translatable("gimpanum.command.unknown_core"));
+                return;
+            }
+            cores.get(0).setConfig(cores.get(0).config().withName(newName));
+            source.sendSuccess(() -> Component.translatable("gimpanum.command.renamed", newName), true);
+        });
         return 1;
     }
 
-    /**
-     * Убирает выбранные Ядра из мира.
-     *
-     * <p>Чанк подгружается: смысл команды именно в том, чтобы дотянуться до
-     * Ядра, до которого не дойти. Подрыв отличается от удаления только тем,
-     * что оставляет предохранитель снятым, и потому запускает всё посмертное —
-     * взрыв, команды и Печать.
-     */
     private static int delete(CommandContext<CommandSourceStack> context, CoreResolver resolver,
                               boolean detonate) throws CommandSyntaxException {
         MinecraftServer server = context.getSource().getServer();
-        List<UUID> targets = new ArrayList<>();
-        for (CoreBlockEntity core : resolver.resolve(context, true)) {
-            targets.add(core.coreId());
-        }
-        int removed = 0;
+        CommandSourceStack source = context.getSource();
+        List<UUID> targets = resolver.targets(context);
+        int[] removed = {0};
+        int[] left = {targets.size()};
         for (UUID coreId : targets) {
-            if (CoreIndex.delete(server, coreId, detonate)) {
-                removed++;
-            }
+            CoreIndex.deleteAsync(server, coreId, detonate, ok -> {
+                if (ok) {
+                    removed[0]++;
+                }
+                if (--left[0] == 0) {
+                    int count = removed[0];
+                    source.sendSuccess(() -> Component.translatable(
+                            detonate ? "gimpanum.command.detonated" : "gimpanum.command.deleted", count), true);
+                }
+            });
         }
-        int count = removed;
-        context.getSource().sendSuccess(() -> Component.translatable(
-                detonate ? "gimpanum.command.detonated" : "gimpanum.command.deleted", count), true);
-        return count;
+        return targets.size();
     }
 
     private static int setDefaultName(CommandContext<CommandSourceStack> context) {

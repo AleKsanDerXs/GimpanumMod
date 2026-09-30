@@ -31,6 +31,11 @@ public final class Later {
     private Later() {
     }
 
+    /** Сколько отложенных действий ждёт своего часа — для {@code /gimpanum stats}. */
+    public static int size() {
+        return TASKS.size();
+    }
+
     /** Сделать это через столько тиков в этом измерении. */
     public static void run(ServerLevel level, int delay, Consumer<ServerLevel> action) {
         TASKS.add(new Task(level.dimension(), level.getGameTime() + delay, action));
@@ -52,7 +57,14 @@ public final class Later {
                 it.remove();
             }
         }
-        due.forEach(task -> task.action().accept(level));
+        // Исключение в одной задаче не должно ни ронять тик мира, ни съедать остальные.
+        for (Task task : due) {
+            try {
+                task.action().accept(level);
+            } catch (Throwable failure) {
+                Gimpanum.LOGGER.error("Отложенное действие ловушки упало", failure);
+            }
+        }
     }
 
     @SubscribeEvent

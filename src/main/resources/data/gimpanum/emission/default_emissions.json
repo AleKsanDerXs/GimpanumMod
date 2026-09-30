@@ -46,6 +46,8 @@
         "  метеорит. Виден за fuse_ticks тиков: след с неба и кольцо на земле. Удар —",
         "  взрыв силой power и обломок: сырое железо, магма, изредка древние",
         "  обломки или хрустальная корка. Падают только на поверхность.",
+        "  break_blocks — ломает ли взрыв блоки (false — только урон существам);",
+        "  place_debris — оставлять ли обломок в воронке.",
         "convulsions — Судороги: duration_seconds секунд раз в",
         "  interval_seconds_min..max секунд толчок: за секунду гул, потом всех на",
         "  земле подбрасывает со скоростью launch_speed_min..max (блоков за тик;",
@@ -125,7 +127,9 @@
         "distance_blocks_min": 6,
         "distance_blocks_max": 40,
         "fuse_ticks": 50,
-        "power": 3.0
+        "power": 3.0,
+        "break_blocks": true,
+        "place_debris": true
     },
     "convulsions": {
         "weight": 1.0,

@@ -52,7 +52,15 @@ import java.util.UUID;
 @EventBusSubscriber(modid = Gimpanum.MOD_ID)
 public final class Visions {
 
-    /** Метка видения в данных сущности. */
+    /**
+     * Метка видения — тег сущности.
+     *
+     * <p>Раньше метка лежала в {@code getPersistentData()}, а оно лениво
+     * заводит пустой NBT-тег каждой сущности, у которой его не было. Проверка
+     * же идёт на вход в мир <i>любой</i> сущности сервера; тег ничего не
+     * заводит. Старая метка в данных всё ещё узнаётся — но только у видов, из
+     * которых мог родиться видение.
+     */
     private static final String MARK = "gimpanum_vision";
 
     /** Кем может предстать прошлое. */
@@ -62,6 +70,15 @@ public final class Visions {
             EntityType.CAT, EntityType.OCELOT, EntityType.PANDA, EntityType.POLAR_BEAR, EntityType.GOAT,
             EntityType.TURTLE, EntityType.FROG, EntityType.AXOLOTL, EntityType.PARROT, EntityType.CAMEL,
             EntityType.SNIFFER, EntityType.ARMADILLO, EntityType.MOOSHROOM, EntityType.BEE);
+
+    private static final java.util.Set<EntityType<?>> ANIMAL_TYPES = java.util.Set.copyOf(ANIMALS);
+
+    private static boolean marked(net.minecraft.world.entity.Entity entity) {
+        if (entity.getTags().contains(MARK)) {
+            return true;
+        }
+        return ANIMAL_TYPES.contains(entity.getType()) && entity.getPersistentData().getBoolean(MARK);
+    }
 
     /** Больше этого атрибут размера не позволяет. */
     private static final double MAX_SCALE = 16.0;
@@ -84,6 +101,11 @@ public final class Visions {
     private static final Map<UUID, Vision> ACTIVE = new HashMap<>();
 
     private Visions() {
+    }
+
+    /** Сколько видений живёт сейчас — для {@code /gimpanum stats}. */
+    public static int active() {
+        return ACTIVE.size();
     }
 
     /** Сколько видений сейчас пришло к этому игроку. */
@@ -121,7 +143,7 @@ public final class Visions {
             scale.setBaseValue(Math.min(MAX_SCALE, settings().number("size_blocks") / size));
             mob.refreshDimensions();
         }
-        mob.getPersistentData().putBoolean(MARK, true);
+        mob.addTag(MARK);
 
         // Сначала в список, потом в мир: при входе в мир метку проверяют, и
         // неведомое видение туда не пустили бы.
@@ -244,7 +266,7 @@ public final class Visions {
     /** Видение, которое никто не ведёт, в мир не входит. */
     @SubscribeEvent
     public static void onJoin(EntityJoinLevelEvent event) {
-        if (!event.getLevel().isClientSide && event.getEntity().getPersistentData().getBoolean(MARK)
+        if (!event.getLevel().isClientSide && marked(event.getEntity())
                 && !ACTIVE.containsKey(event.getEntity().getUUID())) {
             event.setCanceled(true);
         }
@@ -253,7 +275,7 @@ public final class Visions {
     /** С видениями не поговоришь, не покормишь и верхом не сядешь. */
     @SubscribeEvent
     public static void onInteract(PlayerInteractEvent.EntityInteract event) {
-        if (event.getTarget().getPersistentData().getBoolean(MARK)) {
+        if (marked(event.getTarget())) {
             event.setCanceled(true);
             event.setCancellationResult(InteractionResult.FAIL);
         }
@@ -261,7 +283,7 @@ public final class Visions {
 
     @SubscribeEvent
     public static void onInteractAt(PlayerInteractEvent.EntityInteractSpecific event) {
-        if (event.getTarget().getPersistentData().getBoolean(MARK)) {
+        if (marked(event.getTarget())) {
             event.setCanceled(true);
             event.setCancellationResult(InteractionResult.FAIL);
         }

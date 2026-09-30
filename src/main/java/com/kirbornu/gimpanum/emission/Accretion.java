@@ -111,7 +111,11 @@ final class Accretion extends LastingEmission {
 
     private static void strike(ServerLevel level, BlockPos ground, JsonConfig.Section config, RandomSource random) {
         level.explode(null, ground.getX() + 0.5, ground.getY() + 0.5, ground.getZ() + 0.5,
-                (float) config.number("power"), false, Level.ExplosionInteraction.BLOCK);
+                (float) config.number("power"), false,
+                config.bool("break_blocks") ? Level.ExplosionInteraction.BLOCK : Level.ExplosionInteraction.NONE);
+        if (!config.bool("place_debris")) {
+            return;
+        }
         // Сам обломок — в дне свежей ямы, наполовину в земле.
         double size = 1.0 + random.nextDouble() * 0.8;
         int reach = (int) Math.ceil(size);

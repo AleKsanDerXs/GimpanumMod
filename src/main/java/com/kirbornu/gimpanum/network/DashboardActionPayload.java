@@ -24,11 +24,14 @@ import java.util.UUID;
 public record DashboardActionPayload(List<UUID> cores, CoreAction action, String argument)
         implements CustomPacketPayload {
 
+    /** Больше Ядер в одном пакете не принимается: список приходит от клиента, до проверки прав. */
+    public static final int MAX_CORES = 1500;
+
     public static final Type<DashboardActionPayload> TYPE = new Type<>(Gimpanum.id("dashboard_action"));
 
     public static final StreamCodec<RegistryFriendlyByteBuf, DashboardActionPayload> STREAM_CODEC =
             StreamCodec.composite(
-                    UUIDUtil.STREAM_CODEC.apply(ByteBufCodecs.list()), DashboardActionPayload::cores,
+                    UUIDUtil.STREAM_CODEC.apply(ByteBufCodecs.list(MAX_CORES)), DashboardActionPayload::cores,
                     CoreAction.STREAM_CODEC, DashboardActionPayload::action,
                     ByteBufCodecs.STRING_UTF8, DashboardActionPayload::argument,
                     DashboardActionPayload::new);

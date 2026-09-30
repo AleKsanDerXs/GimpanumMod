@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 /**
  * Серверная часть консоли Ядер.
@@ -84,13 +85,20 @@ public final class CoreDashboard {
 
     // --- Действия -------------------------------------------------------------
 
-    /** Выполняет действие над каждым из указанных Ядер и отчитывается о числе. */
+    /**
+     * Выполняет действие над каждым из указанных Ядер и отчитывается о числе.
+     *
+     * <p>Ядра на выгруженных кораблях подгружаются без ожидания главным
+     * потоком (см. {@link CoreIndex#resolveAsync}); отчёт приходит, когда
+     * обработано последнее. Раньше каждое такое Ядро читало свой чанк с диска
+     * прямо в этом вызове, и действие над сотней кораблей замораживало сервер.
+     */
     public static void act(ServerPlayer player, List<UUID> cores, CoreAction action, String argument) {
         if (!player.hasPermissions(PERMISSION)) {
             return;
         }
         MinecraftServer server = player.server;
-        int done = 0;
+        List<UUID> todo = new ArrayList<>();
         int blocked = 0;
 
         for (UUID coreId : cores) {
@@ -98,45 +106,54 @@ public final class CoreDashboard {
                 blocked++;
                 continue;
             }
-            if (perform(player, server, coreId, action, argument)) {
-                done++;
-            }
+            todo.add(coreId);
         }
 
-        report(player, action, done, blocked);
-        send(player);
+        int skipped = blocked;
+        if (todo.isEmpty()) {
+            report(player, action, 0, skipped);
+            send(player);
+            return;
+        }
+        int[] done = {0};
+        int[] left = {todo.size()};
+        for (UUID coreId : todo) {
+            perform(player, server, coreId, action, argument, ok -> {
+                if (ok) {
+                    done[0]++;
+                }
+                if (--left[0] == 0) {
+                    report(player, action, done[0], skipped);
+                    send(player);
+                }
+            });
+        }
     }
 
-    private static boolean perform(ServerPlayer player, MinecraftServer server, UUID coreId,
-                                   CoreAction action, String argument) {
+    private static void perform(ServerPlayer player, MinecraftServer server, UUID coreId,
+                                CoreAction action, String argument, Consumer<Boolean> result) {
         switch (action) {
             case LOCK -> {
                 CoreLocks.setLocked(server, coreId, true);
-                return true;
+                result.accept(true);
             }
             case UNLOCK -> {
                 CoreLocks.setLocked(server, coreId, false);
-                return true;
+                result.accept(true);
             }
-            case DELETE, DETONATE -> {
-                boolean removed = CoreIndex.delete(server, coreId, action == CoreAction.DETONATE);
-                if (removed) {
-                    // Замок исчезнувшего Ядра держать незачем, а идентификаторы
-                    // не переиспользуются — совпадения с будущим Ядром не будет.
-                    CoreLocks.forget(server, coreId);
-                }
-                return removed;
-            }
-            case TELEPORT -> {
-                return teleport(player, server, coreId);
-            }
-            default -> {
-                Optional<CoreBlockEntity> found = CoreIndex.findById(server, coreId, true);
-                if (found.isEmpty()) {
-                    return false;
-                }
-                return edit(found.get(), action, argument);
-            }
+            case DELETE, DETONATE -> CoreIndex.deleteAsync(server, coreId, action == CoreAction.DETONATE,
+                    removed -> {
+                        if (removed) {
+                            // Замок исчезнувшего Ядра держать незачем, а идентификаторы
+                            // не переиспользуются — совпадения с будущим Ядром не будет.
+                            CoreLocks.forget(server, coreId);
+                        }
+                        result.accept(removed);
+                    });
+            case TELEPORT -> CoreIndex.resolveAsync(server, List.of(coreId),
+                    found -> result.accept(!found.isEmpty() && teleport(player, found.get(0))));
+            default -> CoreIndex.resolveAsync(server, List.of(coreId),
+                    found -> result.accept(!found.isEmpty() && edit(found.get(0), action, argument)));
         }
     }
 
@@ -180,12 +197,11 @@ public final class CoreDashboard {
      * миллионы блоков, и телепорт туда высадил бы игрока в пустоте рядом с
      * невидимой копией корабля.
      */
-    private static boolean teleport(ServerPlayer player, MinecraftServer server, UUID coreId) {
-        Optional<CoreBlockEntity> found = CoreIndex.findById(server, coreId, true);
-        if (found.isEmpty() || !(found.get().getLevel() instanceof ServerLevel level)) {
+    private static boolean teleport(ServerPlayer player, CoreBlockEntity core) {
+        if (!(core.getLevel() instanceof ServerLevel level)) {
             return false;
         }
-        Vec3 where = SubLevelSupport.worldCenter(level, found.get().getBlockPos());
+        Vec3 where = SubLevelSupport.worldCenter(level, core.getBlockPos());
         player.teleportTo(level, where.x, where.y + 1.0, where.z, player.getYRot(), player.getXRot());
         return true;
     }
@@ -213,36 +229,36 @@ public final class CoreDashboard {
             mask &= ~ConfigSection.NAME.bit();
         }
 
-        int done = 0;
+        List<UUID> todo = new ArrayList<>();
         int blocked = 0;
         for (UUID coreId : cores) {
             if (CoreLocks.isLocked(server, coreId)) {
                 blocked++;
-                continue;
+            } else {
+                todo.add(coreId);
             }
-            Optional<CoreBlockEntity> found = CoreIndex.findById(server, coreId, true);
-            if (found.isEmpty()) {
-                continue;
-            }
-            CoreBlockEntity core = found.get();
-            int effective = mask;
-            if (ConfigSection.NAME.in(effective)
-                    && CoreIndex.isNameTaken(server, source.name(), coreId)) {
-                effective &= ~ConfigSection.NAME.bit();
-                player.sendSystemMessage(Component.translatable("gimpanum.command.name_taken")
-                        .withStyle(ChatFormatting.RED));
-            }
-            core.setConfig(ConfigSection.merge(core.config(), source, effective));
-            done++;
         }
 
-        int changed = done;
-        player.sendSystemMessage(Component.translatable("gimpanum.dashboard.applied", changed)
-                .withStyle(ChatFormatting.GRAY));
-        if (blocked > 0) {
-            warnBlocked(player, blocked);
-        }
-        send(player);
+        int skipped = blocked;
+        int baseMask = mask;
+        CoreIndex.resolveAsync(server, todo, found -> {
+            for (CoreBlockEntity core : found) {
+                int effective = baseMask;
+                if (ConfigSection.NAME.in(effective)
+                        && CoreIndex.isNameTaken(server, source.name(), core.coreId())) {
+                    effective &= ~ConfigSection.NAME.bit();
+                    player.sendSystemMessage(Component.translatable("gimpanum.command.name_taken")
+                            .withStyle(ChatFormatting.RED));
+                }
+                core.setConfig(ConfigSection.merge(core.config(), source, effective));
+            }
+            player.sendSystemMessage(Component.translatable("gimpanum.dashboard.applied", found.size())
+                    .withStyle(ChatFormatting.GRAY));
+            if (skipped > 0) {
+                warnBlocked(player, skipped);
+            }
+            send(player);
+        });
     }
 
     // --- Отчёты ---------------------------------------------------------------

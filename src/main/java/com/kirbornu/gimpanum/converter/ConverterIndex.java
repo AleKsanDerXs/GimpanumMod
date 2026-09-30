@@ -106,6 +106,10 @@ public final class ConverterIndex extends SavedData {
      * схематикой, теряют вместе с повреждённым чанком. Проверяются только
      * загруженные позиции — подгружать ради списка чанки по всей карте нельзя.
      */
+    public static int count(MinecraftServer server) {
+        return get(server).entries.size();
+    }
+
     public static List<Entry> all(MinecraftServer server) {
         ConverterIndex index = get(server);
         List<Entry> found = new ArrayList<>();

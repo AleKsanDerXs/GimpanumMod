@@ -1,6 +1,9 @@
 package com.kirbornu.gimpanum.converter;
 
 import com.kirbornu.gimpanum.Gimpanum;
+import com.kirbornu.gimpanum.config.JsonConfig;
+import com.kirbornu.gimpanum.perf.PerformanceConfig;
+import com.kirbornu.gimpanum.sublevel.SubLevelSupport;
 import com.kirbornu.gimpanum.network.GimpanumNetwork;
 import com.kirbornu.gimpanum.registry.GimpanumContent;
 import net.minecraft.ChatFormatting;
@@ -29,6 +32,7 @@ public class ConverterBlockEntity extends BlockEntity {
     private static final String KEY_CONFIG = "GimpanumConverterConfig";
     private static final String KEY_PROGRESS = "GimpanumConverterProgress";
     private static final String KEY_OFFER = "GimpanumConverterOffer";
+    private static final String KEY_OWED = "GimpanumConverterOwed";
 
     /**
      * Метка «выбрать обмен при первой загрузке».
@@ -76,6 +80,13 @@ public class ConverterBlockEntity extends BlockEntity {
 
     private int absorbTimer;
 
+    /** Сколько предметов заработано, но ещё не выдано: выдача идёт порциями, см. {@code converter.max_items_per_pulse}. */
+    private int owed;
+
+    private ConverterConfig cached;
+
+    private int cachedGeneration = -1;
+
     public ConverterBlockEntity(BlockPos pos, BlockState state) {
         super(GimpanumContent.PHONOS_CONVERTER_BLOCK_ENTITY.get(), pos, state);
     }
@@ -90,9 +101,16 @@ public class ConverterBlockEntity extends BlockEntity {
      * только их спросят.
      */
     public ConverterConfig config() {
-        return offerId.flatMap(ConverterOffers::byId)
-                .map(ConverterOffers.Offer::toConfig)
-                .orElse(stored);
+        // Итог кэшируется: раньше на каждый тик каждого конвертера создавался
+        // новый объект. Кэш сбрасывается правкой блока и перечтением файла предложений.
+        int generation = ConverterOffers.generation();
+        if (cached == null || cachedGeneration != generation) {
+            cached = offerId.flatMap(ConverterOffers::byId)
+                    .map(ConverterOffers.Offer::toConfig)
+                    .orElse(stored);
+            cachedGeneration = generation;
+        }
+        return cached;
     }
 
     public int progress() {
@@ -105,10 +123,11 @@ public class ConverterBlockEntity extends BlockEntity {
         // Ручная настройка отвязывает от файла: с этого мгновения у конвертера
         // свои условия, и общая правка баланса его больше не касается.
         this.offerId = Optional.empty();
+        this.cached = null;
         setChanged();
         // Подпись видна на карте, поэтому её правка обязана дойти до игроков.
         if (labelChanged && level != null && level.getServer() != null) {
-            GimpanumNetwork.broadcastMarkers(level.getServer());
+            GimpanumNetwork.requestMarkerBroadcast();
         }
     }
 
@@ -128,10 +147,15 @@ public class ConverterBlockEntity extends BlockEntity {
                     offerId = offer.id();
                     stored = offer.toConfig();
                 });
+                cached = null;
                 setChanged();
             }
-            ConverterIndex.put(serverLevel.getServer(), level.dimension(), worldPosition);
-            GimpanumNetwork.broadcastMarkers(serverLevel.getServer());
+            // Конвертер на плоту корабля Sable стоит в служебном регионе карты:
+            // метка на миникарте указала бы в пустоту, а указатель засорился бы.
+            if (!SubLevelSupport.isOnSubLevel(level, worldPosition)) {
+                ConverterIndex.put(serverLevel.getServer(), level.dimension(), worldPosition);
+                GimpanumNetwork.requestMarkerBroadcast();
+            }
         }
     }
 
@@ -168,6 +192,7 @@ public class ConverterBlockEntity extends BlockEntity {
         // Выдача проверяется и без приёма: после правки баланса квота может
         // оказаться ниже уже набранного, и ждать следующего броска нечестно.
         payOut(serverLevel, config);
+        release(serverLevel, config);
     }
 
     /**
@@ -209,7 +234,7 @@ public class ConverterBlockEntity extends BlockEntity {
         progress -= completed * quota;
         setChanged();
 
-        drop(serverLevel, completed * config.outputCount(), config);
+        owed += completed * config.outputCount();
 
         // Изредка вместе с наградой выпадает чужая книга. Конвертеры стоят
         // там, где кто-то уже побывал, и это единственный способ, которым
@@ -220,6 +245,32 @@ public class ConverterBlockEntity extends BlockEntity {
                         book -> Block.popResource(serverLevel, worldPosition.above(), book));
             }
         }
+    }
+
+    /**
+     * Выдаёт заработанное порциями.
+     *
+     * <p>Раньше всё выпадало разом: при накопленном прогрессе и выходе в тысячи
+     * предметов это сотни предметных сущностей в один тик. Теперь за раз
+     * выдаётся не больше {@code converter.max_items_per_pulse}, а пока рядом
+     * лежит больше {@code converter.pause_when_items_nearby} предметов, выдача
+     * ждёт, пока их разберут. Остаток хранится в блоке и переживает перезапуск.
+     */
+    private void release(ServerLevel serverLevel, ConverterConfig config) {
+        if (owed <= 0) {
+            return;
+        }
+        JsonConfig.Section limits = PerformanceConfig.of("converter");
+        int pause = limits.integer("pause_when_items_nearby");
+        if (pause > 0 && serverLevel.getEntitiesOfClass(ItemEntity.class,
+                new AABB(worldPosition).inflate(8.0)).size() > pause) {
+            return;
+        }
+        int cap = limits.integer("max_items_per_pulse");
+        int amount = cap > 0 ? Math.min(owed, cap) : owed;
+        owed -= amount;
+        setChanged();
+        drop(serverLevel, amount, config);
     }
 
     /**
@@ -301,6 +352,8 @@ public class ConverterBlockEntity extends BlockEntity {
         super.loadAdditional(tag, registries);
         progress = tag.getInt(KEY_PROGRESS);
         rollPending = tag.getBoolean(KEY_ROLL);
+        owed = tag.getInt(KEY_OWED);
+        cached = null;
         offerId = tag.contains(KEY_OFFER) ? Optional.of(tag.getString(KEY_OFFER)) : Optional.empty();
         if (tag.contains(KEY_CONFIG)) {
             stored = ConverterConfig.CODEC
@@ -316,6 +369,9 @@ public class ConverterBlockEntity extends BlockEntity {
     protected void saveAdditional(CompoundTag tag, HolderLookup.Provider registries) {
         super.saveAdditional(tag, registries);
         tag.putInt(KEY_PROGRESS, progress);
+        if (owed > 0) {
+            tag.putInt(KEY_OWED, owed);
+        }
         if (rollPending) {
             tag.putBoolean(KEY_ROLL, true);
         }

@@ -51,7 +51,7 @@ final class Traps {
         TreeMap<Integer, List<BlockPos>> rings = new TreeMap<>();
         for (BlockPos pos : BlockPos.betweenClosed(centre.offset(-radius, -radius, -radius),
                 centre.offset(radius, radius, radius))) {
-            if (pos.distSqr(centre) <= radius * radius && alive(level.getBlockState(pos))) {
+            if (pos.distSqr(centre) <= radius * radius && level.hasChunkAt(pos) && alive(level.getBlockState(pos))) {
                 rings.computeIfAbsent((int) Math.sqrt(pos.distSqr(centre)), ring -> new ArrayList<>()).add(pos.immutable());
             }
         }
@@ -79,6 +79,11 @@ final class Traps {
     }
 
     private static void wither(ServerLevel level, BlockPos pos) {
+        // Волна идёт несколько секунд: чанк за это время мог выгрузиться, а обращение к
+        // выгруженному загрузило бы его синхронно.
+        if (!level.hasChunkAt(pos)) {
+            return;
+        }
         BlockState state = level.getBlockState(pos);
         if (!alive(state)) {
             return;
@@ -110,6 +115,9 @@ final class Traps {
         List<BlockPos> glass = new ArrayList<>();
         for (BlockPos pos : BlockPos.betweenClosed(centre.offset(-spread, -spread, -spread),
                 centre.offset(spread, spread, spread))) {
+            if (!level.hasChunkAt(pos)) {
+                continue;
+            }
             BlockState state = level.getBlockState(pos);
             if ((state.getBlock() instanceof StainedGlassBlock || state.getBlock() instanceof StainedGlassPaneBlock)
                     && random.nextDouble() < share) {
@@ -118,7 +126,11 @@ final class Traps {
         }
         for (int i = 0; i < glass.size(); i++) {
             BlockPos pos = glass.get(i);
-            Later.run(level, i % 40, now -> now.destroyBlock(pos, false));
+            Later.run(level, i % 40, now -> {
+                if (now.hasChunkAt(pos)) {
+                    now.destroyBlock(pos, false);
+                }
+            });
         }
 
         int memories = config.between("memories", random);

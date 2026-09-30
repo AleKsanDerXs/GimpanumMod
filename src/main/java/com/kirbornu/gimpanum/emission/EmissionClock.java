@@ -45,7 +45,11 @@ final class EmissionClock extends SavedData {
     /** Отсчитать тик и сказать, сколько осталось. */
     int tickDown() {
         left--;
-        setDirty();
+        // Раз в десять секунд, а не каждый тик: иначе файл переписывается на каждом автосохранении
+        // (при остановке сервера метка ставится отдельно, см. Emissions.onServerStopping).
+        if (left % 200 == 0) {
+            setDirty();
+        }
         return left;
     }
 

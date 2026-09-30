@@ -1,5 +1,7 @@
 package com.kirbornu.gimpanum.dimension;
 
+import com.kirbornu.gimpanum.config.JsonConfig;
+import com.kirbornu.gimpanum.perf.PerformanceConfig;
 import com.kirbornu.gimpanum.Gimpanum;
 import com.kirbornu.gimpanum.registry.GimpanumContent;
 import net.minecraft.core.BlockPos;
@@ -33,7 +35,9 @@ import net.neoforged.neoforge.event.level.BlockEvent;
 public class VolatileGasBlock extends Block {
 
     /** Сила взрыва — чуть слабее крипера: карман в пять блоков и так даёт пять взрывов. */
-    private static final float POWER = 2.5F;
+    /** Сколько газовых взрывов уже прошло в этот тик; см. {@code volatile_gas.max_per_tick}. */
+    private static long budgetTick = -1;
+    private static int budgetUsed;
 
     /** Задержка вспышки, тиков: от сломанного блока — почти сразу, по цепи — с разбросом. */
     private static final int FUSE_MIN = 2;
@@ -60,9 +64,26 @@ public class VolatileGasBlock extends Block {
 
     @Override
     protected void tick(BlockState state, ServerLevel level, BlockPos pos, RandomSource random) {
+        JsonConfig.Section config = PerformanceConfig.of("volatile_gas");
+        // Потолок взрывов за тик: облако газа рвётся цепочкой, и без потолка
+        // сотня взрывов может прийтись на один тик. Лишние переносятся на следующий.
+        int cap = config.integer("max_per_tick");
+        if (cap > 0) {
+            long now = level.getGameTime();
+            if (now != budgetTick) {
+                budgetTick = now;
+                budgetUsed = 0;
+            }
+            if (budgetUsed >= cap) {
+                level.scheduleTick(pos, this, 1 + random.nextInt(FUSE_SPREAD));
+                return;
+            }
+            budgetUsed++;
+        }
         level.removeBlock(pos, false);
-        level.explode(null, pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5, POWER, false,
-                Level.ExplosionInteraction.BLOCK);
+        level.explode(null, pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5,
+                (float) config.number("power"), false,
+                config.bool("break_blocks") ? Level.ExplosionInteraction.BLOCK : Level.ExplosionInteraction.NONE);
     }
 
     /**

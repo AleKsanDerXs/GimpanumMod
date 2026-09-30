@@ -30,8 +30,13 @@ public final class LoadedBlockEntities {
 
     /** Чанки, где блок-сущность может тикать. */
     public static LongSet candidates(ServerLevel level) {
+        return candidates(level, Integer.MAX_VALUE);
+    }
+
+    /** То же, но не дальше {@code maxRadius} чанков от игрока: осмотру не нужна вся дальность симуляции. */
+    public static LongSet candidates(ServerLevel level, int maxRadius) {
         LongSet chunks = new LongOpenHashSet();
-        int radius = level.getServer().getPlayerList().getSimulationDistance();
+        int radius = Math.min(maxRadius, level.getServer().getPlayerList().getSimulationDistance());
         for (ServerPlayer player : level.players()) {
             ChunkPos centre = player.chunkPosition();
             for (int dx = -radius; dx <= radius; dx++) {

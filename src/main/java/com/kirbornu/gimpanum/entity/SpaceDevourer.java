@@ -1,6 +1,7 @@
 package com.kirbornu.gimpanum.entity;
 
 import com.kirbornu.gimpanum.entity.goal.BoreChaseGoal;
+import com.kirbornu.gimpanum.perf.PerformanceConfig;
 import com.kirbornu.gimpanum.entity.goal.DevourBlocksGoal;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -86,6 +87,9 @@ public class SpaceDevourer extends Monster {
      * охоту обрывало бы то, что жертва просто убежала подальше.
      */
     private boolean hunting;
+
+    /** Сколько тиков длится охота; в сохранение не пишется — после перезапуска отсчёт идёт заново. */
+    private int huntTicks;
 
     public SpaceDevourer(EntityType<? extends Monster> type, Level level) {
         super(type, level);
@@ -186,6 +190,14 @@ public class SpaceDevourer extends Monster {
         if (hunting && target == null) {
             hunting = false;
         }
+        if (hunting) {
+            // Охота Кошмара не вечна: по истечении devourer.hunt_timeout_seconds
+            // Поглотитель снова подчиняется обычному исчезновению вдали от игроков.
+            int limit = PerformanceConfig.of("devourer").integer("hunt_timeout_seconds") * 20;
+            if (limit > 0 && ++huntTicks > limit) {
+                hunting = false;
+            }
+        }
         int id = target == null ? -1 : target.getId();
         if (target != null && (id != lastAnnounced || --chaseCry <= 0)) {
             roar(target);
@@ -224,6 +236,7 @@ public class SpaceDevourer extends Monster {
     public void hunt(Player prey) {
         this.setTarget(prey);
         hunting = true;
+        huntTicks = 0;
     }
 
     @Override

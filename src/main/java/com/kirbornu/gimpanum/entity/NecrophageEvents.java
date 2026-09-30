@@ -1,5 +1,6 @@
 package com.kirbornu.gimpanum.entity;
 
+import com.kirbornu.gimpanum.perf.PerformanceConfig;
 import com.kirbornu.gimpanum.Gimpanum;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.tags.TagKey;
@@ -32,6 +33,7 @@ public final class NecrophageEvents {
     @SubscribeEvent
     public static void onTick(EntityTickEvent.Post event) {
         if (!(event.getEntity() instanceof Mob mob)
+                || mob.tickCount % PerformanceConfig.necrophageInterval() != 0
                 || mob.level().isClientSide
                 || !mob.getType().is(NECROPHAGE)) {
             return;

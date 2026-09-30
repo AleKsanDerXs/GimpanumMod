@@ -1,9 +1,9 @@
 package com.kirbornu.gimpanum.core;
 
 import com.kirbornu.gimpanum.Gimpanum;
+import com.kirbornu.gimpanum.perf.ChunkLoads;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
-import net.minecraft.core.SectionPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.NbtOps;
@@ -13,16 +13,19 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.chunk.status.ChunkStatus;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.saveddata.SavedData;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 /**
@@ -160,15 +163,25 @@ public final class CoreIndex extends SavedData {
 
     // --- Изменение -----------------------------------------------------------
 
-    /** Отмечает, где Ядро находится сейчас и как оно настроено. */
+    /**
+     * Отмечает, где Ядро находится сейчас и как оно настроено.
+     *
+     * <p>Грязным указатель становится, только если запись действительно
+     * изменилась: вызывается это при каждой загрузке чанка с Ядром, и
+     * безусловная пометка переписывала бы весь указатель на каждом автосохранении.
+     */
     public static void put(MinecraftServer server, String name, UUID coreId,
                            ResourceKey<Level> dimension, BlockPos pos, CoreConfig config) {
         CoreIndex index = get(server);
         Entry previous = index.byId.get(coreId);
+        Entry entry = new Entry(name, dimension, pos.immutable(), config);
+        if (entry.equals(previous) && coreId.equals(index.byName.get(name))) {
+            return;
+        }
         if (previous != null && !previous.name().equals(name)) {
             index.byName.remove(previous.name());
         }
-        index.byId.put(coreId, new Entry(name, dimension, pos.immutable(), config));
+        index.byId.put(coreId, entry);
         index.byName.put(name, coreId);
         index.setDirty();
     }
@@ -190,34 +203,36 @@ public final class CoreIndex extends SavedData {
     // --- Поиск ---------------------------------------------------------------
 
     /**
-     * Ищет Ядро по имени.
+     * Ищет Ядро по имени <b>среди уже загруженных</b>.
      *
-     * @param allowChunkLoad подгружать ли чанк, если Ядро выгружено. Для команд
-     *                       это нужно, а вот для подсказок недопустимо: они
-     *                       строятся на каждое нажатие клавиши, и подгрузка
-     *                       чанков там уронила бы сервер.
+     * <p>Чанки здесь не грузятся никогда: раньше был вариант с синхронной
+     * подгрузкой, и одна команда над Ядром на выгруженном корабле ставила
+     * сервер, пока чанк читался с диска. Тем, кому нужны и выгруженные, —
+     * {@link #resolveAsync}.
      */
-    public static Optional<CoreBlockEntity> find(MinecraftServer server, String name,
-                                                 boolean allowChunkLoad) {
+    public static Optional<CoreBlockEntity> find(MinecraftServer server, String name) {
         UUID coreId = get(server).byName.get(name);
-        return coreId == null ? Optional.empty() : findById(server, coreId, allowChunkLoad);
+        return coreId == null ? Optional.empty() : findById(server, coreId);
+    }
+
+    /** Постоянный идентификатор Ядра с этим именем — по указателю, без чанков. */
+    public static Optional<UUID> idOf(MinecraftServer server, String name) {
+        return Optional.ofNullable(get(server).byName.get(name));
     }
 
     /**
-     * Ищет Ядро по постоянному идентификатору.
+     * Ищет Ядро по постоянному идентификатору среди загруженных.
      *
      * <p>Именно так адресует Ядра консоль: имя можно переименовать прямо в
      * открытом окне, а идентификатор у блока один на всю его жизнь.
      *
      * <p>Про запись в указателе. Она удаляется <b>только</b> тогда, когда чанк
-     * действительно прочитан и Ядра в нём нет: это значит, что блок исчез
-     * помимо нас. Если же чанк недоступен — измерение не загружено, чтение
-     * сорвалось — запись остаётся на месте. Раньше здесь удалялось и в этом
-     * случае, и любая заминка навсегда стирала имя Ядра, до которого просто не
-     * дотянулись.
+     * действительно загружен и Ядра в нём нет: это значит, что блок исчез
+     * помимо нас. Если чанк выгружен, запись остаётся на месте. Раньше здесь
+     * удалялось и в этом случае, и любая заминка навсегда стирала имя Ядра, до
+     * которого просто не дотянулись.
      */
-    public static Optional<CoreBlockEntity> findById(MinecraftServer server, UUID coreId,
-                                                     boolean allowChunkLoad) {
+    public static Optional<CoreBlockEntity> findById(MinecraftServer server, UUID coreId) {
         CoreIndex index = get(server);
         Entry entry = index.byId.get(coreId);
         if (entry == null) {
@@ -225,14 +240,8 @@ public final class CoreIndex extends SavedData {
         }
 
         ServerLevel level = server.getLevel(entry.dimension());
-        if (level == null) {
+        if (level == null || !level.hasChunkAt(entry.pos())) {
             return Optional.empty();
-        }
-        boolean loaded = level.hasChunkAt(entry.pos());
-        if (!loaded) {
-            if (!allowChunkLoad || !forceLoad(level, entry)) {
-                return Optional.empty();
-            }
         }
 
         if (level.getBlockEntity(entry.pos()) instanceof CoreBlockEntity core
@@ -248,23 +257,70 @@ public final class CoreIndex extends SavedData {
     }
 
     /**
-     * Читает чанк с Ядром с диска.
+     * Находит Ядра по идентификаторам, при нужде подгружая их чанки — но без
+     * ожидания на главном потоке.
      *
-     * <p>Формально это делает и сам {@code getBlockEntity}, но неявно и без
-     * права на отказ: там, где чанка нет, разница между «не дотянулись» и
-     * «Ядра больше нет» стирается. Здесь загрузка спрашивается отдельно, и
-     * неудача возвращается как неудача.
+     * <p>Уже загруженные Ядра отдаются сразу, в этом же вызове. Для остальных
+     * заказывается подгрузка через {@link ChunkLoads} (чанки одной группы — одним
+     * запросом), и когда всё готово, вызывается {@code then} — на главном потоке,
+     * в порядке исходного списка. Ядра, до которых не дотянулись (нет измерения,
+     * чанк не дождались), в список не попадают, а их записи остаются в указателе.
      */
-    private static boolean forceLoad(ServerLevel level, Entry entry) {
-        BlockPos pos = entry.pos();
-        try {
-            return level.getChunk(SectionPos.blockToSectionCoord(pos.getX()),
-                    SectionPos.blockToSectionCoord(pos.getZ()), ChunkStatus.FULL, true) != null;
-        } catch (Exception failure) {
-            Gimpanum.LOGGER.error("Не удалось прочитать чанк Ядра '{}' в {} {}",
-                    entry.name(), entry.dimension().location(), pos.toShortString(), failure);
-            return false;
+    public static void resolveAsync(MinecraftServer server, Collection<UUID> ids,
+                                    Consumer<List<CoreBlockEntity>> then) {
+        CoreIndex index = get(server);
+        Map<UUID, CoreBlockEntity> found = new HashMap<>();
+        Map<ResourceKey<Level>, Map<ChunkPos, List<UUID>>> missing = new LinkedHashMap<>();
+
+        for (UUID coreId : ids) {
+            Entry entry = index.byId.get(coreId);
+            ServerLevel level = entry == null ? null : server.getLevel(entry.dimension());
+            if (level == null) {
+                continue;
+            }
+            if (level.hasChunkAt(entry.pos())) {
+                findById(server, coreId).ifPresent(core -> found.put(coreId, core));
+            } else {
+                missing.computeIfAbsent(entry.dimension(), key -> new LinkedHashMap<>())
+                        .computeIfAbsent(new ChunkPos(entry.pos()), key -> new ArrayList<>())
+                        .add(coreId);
+            }
         }
+
+        int groups = missing.values().stream().mapToInt(Map::size).sum();
+        if (groups == 0) {
+            then.accept(inOrder(ids, found));
+            return;
+        }
+        int[] left = {groups};
+        missing.forEach((dimension, byChunk) -> {
+            ServerLevel level = server.getLevel(dimension);
+            byChunk.forEach((chunk, members) -> ChunkLoads.request(level, chunk, ok -> {
+                if (ok) {
+                    for (UUID coreId : members) {
+                        findById(server, coreId).ifPresent(core -> found.put(coreId, core));
+                    }
+                }
+                if (--left[0] == 0) {
+                    then.accept(inOrder(ids, found));
+                }
+            }));
+        });
+    }
+
+    private static List<CoreBlockEntity> inOrder(Collection<UUID> ids, Map<UUID, CoreBlockEntity> found) {
+        List<CoreBlockEntity> ordered = new ArrayList<>(found.size());
+        for (UUID coreId : ids) {
+            CoreBlockEntity core = found.get(coreId);
+            if (core != null) {
+                ordered.add(core);
+            }
+        }
+        return ordered;
+    }
+
+    public static int count(MinecraftServer server) {
+        return get(server).byId.size();
     }
 
     /** Все известные имена, включая выгруженные Ядра. */
@@ -322,22 +378,30 @@ public final class CoreIndex extends SavedData {
     /**
      * Убирает Ядро из мира на расстоянии, вместе с записью в указателе.
      *
+     * <p>Чанк с Ядром при нужде подгружается без ожидания (см. {@link #resolveAsync});
+     * результат приходит в {@code done}: {@code true}, если блок действительно убран.
+     *
      * @param detonate выполнить ли посмертное: взрыв, команды, Печать. Обычное
      *                 удаление тихое — Ядро на предохранителе ведёт себя как
      *                 любой другой блок, и {@code CoreBlock.onRemove} до
      *                 арбитра даже не доходит. Подрыв же оставляет
      *                 предохранитель снятым и потому запускает всё то же, что
      *                 и разрушение снарядом.
-     * @return {@code true}, если блок действительно убран
      */
-    public static boolean delete(MinecraftServer server, UUID coreId, boolean detonate) {
-        Optional<CoreBlockEntity> found = findById(server, coreId, true);
-        if (found.isEmpty()) {
-            // До блока не дотянулись — но если записи о нём уже нет, значит
-            // Ядро исчезло помимо нас, и удаление можно считать состоявшимся.
-            return get(server).byId.get(coreId) == null;
-        }
-        CoreBlockEntity core = found.get();
+    public static void deleteAsync(MinecraftServer server, UUID coreId, boolean detonate,
+                                   Consumer<Boolean> done) {
+        resolveAsync(server, List.of(coreId), found -> {
+            if (found.isEmpty()) {
+                // До блока не дотянулись — но если записи о нём уже нет, значит
+                // Ядро исчезло помимо нас, и удаление можно считать состоявшимся.
+                done.accept(get(server).byId.get(coreId) == null);
+                return;
+            }
+            done.accept(delete(server, found.get(0), detonate));
+        });
+    }
+
+    private static boolean delete(MinecraftServer server, CoreBlockEntity core, boolean detonate) {
         if (!(core.getLevel() instanceof ServerLevel level)) {
             return false;
         }
@@ -351,7 +415,7 @@ public final class CoreIndex extends SavedData {
         boolean removed = level.removeBlock(core.getBlockPos(), false);
         if (removed && !detonate) {
             // Тихое удаление до арбитра не доходит, запись снимаем сами.
-            remove(server, coreId);
+            remove(server, core.coreId());
         }
         return removed;
     }
@@ -382,19 +446,29 @@ public final class CoreIndex extends SavedData {
     }
 
     /**
-     * Все Ядра, чьи имена подходят под образец с подстановкой {@link #WILDCARD}.
+     * Идентификаторы всех Ядер, чьи имена подходят под образец с подстановкой
+     * {@link #WILDCARD}, — по указателю, чанки не трогаются.
      *
      * <p>Остальной текст образца экранируется, поэтому точки и дефисы в именах
      * значат сами себя и лишних совпадений не дают.
      */
-    public static List<CoreBlockEntity> findMatching(MinecraftServer server, String selector,
-                                                     boolean allowChunkLoad) {
+    public static List<UUID> idsMatching(MinecraftServer server, String selector) {
         Pattern pattern = toPattern(selector);
-        List<CoreBlockEntity> found = new ArrayList<>();
-        for (String name : names(server)) {
+        CoreIndex index = get(server);
+        List<UUID> found = new ArrayList<>();
+        index.byName.forEach((name, coreId) -> {
             if (pattern.matcher(name).matches()) {
-                find(server, name, allowChunkLoad).ifPresent(found::add);
+                found.add(coreId);
             }
+        });
+        return found;
+    }
+
+    /** То же, но только загруженные Ядра — для подсказок в консоли. */
+    public static List<CoreBlockEntity> findMatching(MinecraftServer server, String selector) {
+        List<CoreBlockEntity> found = new ArrayList<>();
+        for (UUID coreId : idsMatching(server, selector)) {
+            findById(server, coreId).ifPresent(found::add);
         }
         return found;
     }

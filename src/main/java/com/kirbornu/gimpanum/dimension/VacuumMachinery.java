@@ -1,5 +1,6 @@
 package com.kirbornu.gimpanum.dimension;
 
+import com.kirbornu.gimpanum.perf.PerformanceConfig;
 import com.kirbornu.gimpanum.Gimpanum;
 import it.unimi.dsi.fastutil.longs.LongSet;
 import net.minecraft.core.BlockPos;
@@ -77,8 +78,9 @@ public final class VacuumMachinery {
     @SubscribeEvent
     public static void onLevelTick(LevelTickEvent.Post event) {
         if (!(event.getLevel() instanceof ServerLevel level)
+                || !PerformanceConfig.vacuumEnabled()
                 || !NebulaPortal.GIMPANUM.equals(level.dimension())
-                || level.getGameTime() % SCAN_INTERVAL != 0) {
+                || level.getGameTime() % PerformanceConfig.vacuumInterval() != 0) {
             return;
         }
         resolveTypes();
@@ -86,7 +88,7 @@ public final class VacuumMachinery {
             return;
         }
 
-        LongSet chunks = LoadedBlockEntities.candidates(level);
+        LongSet chunks = LoadedBlockEntities.candidates(level, PerformanceConfig.vacuumRadius());
         if (chunks.isEmpty()) {
             if (!lastSeen.isEmpty()) {
                 lastSeen = new HashMap<>();
@@ -157,7 +159,7 @@ public final class VacuumMachinery {
 
     private static void vent(ServerLevel level, BlockPos pos) {
         // Не на каждый осмотр, иначе шипение сливается в сплошной шум.
-        if (level.getGameTime() % 40 >= SCAN_INTERVAL) {
+        if (level.getGameTime() % 40 >= PerformanceConfig.vacuumInterval()) {
             return;
         }
         level.sendParticles(ParticleTypes.SMOKE,

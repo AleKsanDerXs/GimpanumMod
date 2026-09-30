@@ -97,6 +97,9 @@ public final class ConverterOffers {
     /** Предложения по именам: по ним конвертеры и находят свои условия обмена. */
     private static Map<String, Offer> byId = Map.of();
 
+    /** Растёт при каждом чтении файла: по нему конвертеры понимают, что кэш конфига устарел. */
+    private static int generation;
+
     private ConverterOffers() {
     }
 
@@ -118,11 +121,13 @@ public final class ConverterOffers {
                 offers = parse(ops, JsonParser.parseReader(reader));
             }
             byId = index(offers);
+            generation++;
             Gimpanum.LOGGER.info("Предложений Фонос-конвертеров загружено: {}", offers.size());
         } catch (Exception failure) {
             Gimpanum.LOGGER.error("Не прочитались настройки Фонос-конвертеров {}", file, failure);
             offers = List.of();
             byId = Map.of();
+            generation++;
         }
     }
 
@@ -133,6 +138,10 @@ public final class ConverterOffers {
      * или файл не прочитался. Конвертер в этом случае доживает на снимке своих
      * условий, а не встаёт колом.
      */
+    public static int generation() {
+        return generation;
+    }
+
     public static Optional<Offer> byId(String id) {
         return Optional.ofNullable(byId.get(id));
     }

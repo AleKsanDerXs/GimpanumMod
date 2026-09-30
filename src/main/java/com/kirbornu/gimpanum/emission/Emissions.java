@@ -68,6 +68,7 @@ public final class Emissions {
     public static void onServerStopping(ServerStoppingEvent event) {
         running = null;
         warned = false;
+        EmissionClock.get(event.getServer()).setDirty();
     }
 
     @SubscribeEvent
