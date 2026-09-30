@@ -1,0 +1,147 @@
+{
+    "_comment": [
+        "Выбросы Гимпанума — события на всё измерение, которые делают среду злее.",
+        "Правится на ходу, перечитывается командой /gimpanum config reload.",
+        "Для проверок: /gimpanum emission start <событие> | stop | status.",
+        "",
+        "Раздел schedule — расписание:",
+        "  interval_minutes_min/max — через сколько минут следующий выброс,",
+        "                             случайно между ними. Время идёт, только пока",
+        "                             в Гимпануме кто-то есть",
+        "  warning_seconds          — за сколько секунд до выброса предупредить",
+        "",
+        "У каждого события weight — вес при выборе, 0 — не выпадает никогда.",
+        "Действуют события на всех в Гимпануме, кроме творческого режима и",
+        "наблюдателей; кто зашёл посреди длящегося события, тоже его получает.",
+        "",
+        "frenzied_raid — Рейд Неистовых: каждому игроку captains_min..max",
+        "  капитанов в distance_blocks_min..max блоках, сразу на охоте; их отряд",
+        "  пополняется в reinforce_speedup раз быстрее обычного.",
+        "sleeping_god — Кошмар Спящего Бога: Поглотитель в distance_blocks от",
+        "  случайного игрока на его высоте. Охотится на него и не исчезает, пока",
+        "  не потеряет.",
+        "wrath — Приступ Злости: все горят duration_seconds_min..max секунд,",
+        "  damage урона раз в damage_interval_ticks тиков. Огонь не тушится;",
+        "  спасает огнестойкость.",
+        "despondency — Приступ Уныния: Утомление (amplifier 2 — третий уровень)",
+        "  на duration_seconds. Молоко снимает лишь на пару секунд.",
+        "envy — Приступ Зависти: Отравление (amplifier 2 — третий уровень) на",
+        "  duration_seconds. Само не убивает — оставляет 1 HP.",
+        "bad_memories — Плохие Воспоминания: duration_seconds секунд каждому",
+        "  игроку раз в interval_seconds_min..max секунд в distance_blocks_min..max",
+        "  блоках появляется воспоминание. fuse_ticks искрит, потом взрывается:",
+        "  радиус radius_blocks, урон до damage в центре. Блоки и некрофагов не",
+        "  трогает, стены прикрывают, защита от взрывов работает.",
+        "nostalgia — Ностальгия: duration_seconds секунд у каждого игрока",
+        "  visions_min..max видений в distance_blocks_min..max блоках. Видение —",
+        "  ванильное животное размером около size_blocks блоков; живёт",
+        "  life_seconds_min..max секунд, плывёт сквозь блоки со скоростью",
+        "  speed_blocks_per_second. Касание — damage урона мимо брони раз в",
+        "  damage_interval_ticks тиков.",
+        "fever — Лихорадка Хару: duration_seconds секунд Космический песок и пепел",
+        "  жгут, как магма, damage урона за удар. Спасают приседание, Ледоход,",
+        "  огнестойкость или любой другой блок под ногами.",
+        "accretion — Аккреция: duration_seconds секунд рядом с каждым игроком раз в",
+        "  interval_ticks_min..max тиков в distance_blocks_min..max блоках падает",
+        "  метеорит. Виден за fuse_ticks тиков: след с неба и кольцо на земле. Удар —",
+        "  взрыв силой power и обломок: сырое железо, магма, изредка древние",
+        "  обломки или хрустальная корка. Падают только на поверхность.",
+        "  break_blocks — ломает ли взрыв блоки (false — только урон существам);",
+        "  place_debris — оставлять ли обломок в воронке.",
+        "convulsions — Судороги: duration_seconds секунд раз в",
+        "  interval_seconds_min..max секунд толчок: за секунду гул, потом всех на",
+        "  земле подбрасывает со скоростью launch_speed_min..max (блоков за тик;",
+        "  0.9 — около восьми блоков вверх при здешней тяжести).",
+        "guilt — Приступ Вины: duration_seconds секунд удар по некрофагу",
+        "  возвращается ударившему долей reflected_share нанесённого урона, мимо брони."
+    ],
+    "schedule": {
+        "interval_minutes_min": 20,
+        "interval_minutes_max": 60,
+        "warning_seconds": 30
+    },
+    "frenzied_raid": {
+        "weight": 0.5,
+        "captains_min": 1,
+        "captains_max": 2,
+        "distance_blocks_min": 24,
+        "distance_blocks_max": 40,
+        "reinforce_speedup": 3.0
+    },
+    "sleeping_god": {
+        "weight": 0.5,
+        "distance_blocks": 60
+    },
+    "wrath": {
+        "weight": 1.0,
+        "duration_seconds_min": 60,
+        "duration_seconds_max": 180,
+        "damage": 1.0,
+        "damage_interval_ticks": 40
+    },
+    "despondency": {
+        "weight": 1.0,
+        "duration_seconds": 300,
+        "amplifier": 2
+    },
+    "envy": {
+        "weight": 1.0,
+        "duration_seconds": 120,
+        "amplifier": 2
+    },
+    "bad_memories": {
+        "weight": 1.0,
+        "duration_seconds": 180,
+        "interval_seconds_min": 15,
+        "interval_seconds_max": 40,
+        "distance_blocks_min": 2,
+        "distance_blocks_max": 4,
+        "fuse_ticks": 40,
+        "radius_blocks": 7.0,
+        "damage": 20.0
+    },
+    "nostalgia": {
+        "weight": 1.0,
+        "duration_seconds": 180,
+        "visions_min": 1,
+        "visions_max": 2,
+        "distance_blocks_min": 20,
+        "distance_blocks_max": 40,
+        "life_seconds_min": 20,
+        "life_seconds_max": 60,
+        "speed_blocks_per_second": 2.0,
+        "size_blocks": 10.0,
+        "damage": 6.0,
+        "damage_interval_ticks": 10
+    },
+    "fever": {
+        "weight": 1.0,
+        "duration_seconds": 120,
+        "damage": 1.0
+    },
+    "accretion": {
+        "weight": 1.0,
+        "duration_seconds": 180,
+        "interval_ticks_min": 80,
+        "interval_ticks_max": 200,
+        "distance_blocks_min": 6,
+        "distance_blocks_max": 40,
+        "fuse_ticks": 50,
+        "power": 2.0,
+        "break_blocks": false,
+        "place_debris": false
+    },
+    "convulsions": {
+        "weight": 1.0,
+        "duration_seconds": 120,
+        "interval_seconds_min": 15,
+        "interval_seconds_max": 30,
+        "launch_speed_min": 0.8,
+        "launch_speed_max": 1.1
+    },
+    "guilt": {
+        "weight": 1.0,
+        "duration_seconds": 180,
+        "reflected_share": 0.5
+    }
+}

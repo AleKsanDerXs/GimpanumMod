@@ -6,7 +6,8 @@ plugins {
 
 version = mod_version
 group = mod_group_id
-base.archivesName = mod_id
+// Имя джарки как у остальных модов сервера: gimpanum-1.21.1-<версия>.jar
+base.archivesName = "${mod_id}-${minecraft_version}"
 
 java {
     // NeoForge 21.1.x требует Java 21. Toolchain позволяет Gradle подтянуть её
@@ -16,6 +17,9 @@ java {
 
 neoForge {
     version = project.neo_version
+
+    // Игровые тесты (src/test) компилируются против того же NeoForge.
+    addModdingDependenciesTo(sourceSets.test)
 
     runs {
         client {
@@ -29,6 +33,8 @@ neoForge {
         }
         gameTestServer {
             type = 'gameTestServer'
+            // Игровые тесты лежат в src/test и в джарку не попадают.
+            sourceSet = sourceSets.test
             systemProperty 'neoforge.enabledGameTestNamespaces', mod_id
         }
     }
@@ -36,6 +42,7 @@ neoForge {
     mods {
         "${mod_id}" {
             sourceSet(sourceSets.main)
+            sourceSet(sourceSets.test)
         }
     }
 }
@@ -153,4 +160,20 @@ tasks.named('processResources', ProcessResources).configure {
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
     options.release = 21
+}
+
+// Готовая джарка копируется в ../dist — оттуда её берут на сервер.
+tasks.register('dist', Copy) {
+    from tasks.named('jar')
+    into layout.projectDirectory.dir('../dist')
+}
+tasks.named('assemble') {
+    finalizedBy 'dist'
+}
+
+// Каждый прогон игровых тестов начинается с чистого мира: указатели мода сохраняются на диск.
+tasks.matching { it.name == 'runGameTestServer' }.configureEach {
+    doFirst {
+        delete(layout.projectDirectory.dir('run/world'))
+    }
 }
